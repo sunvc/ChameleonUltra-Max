@@ -1243,6 +1243,10 @@ static int get_information_size_by_tag_type(tag_specific_type_t type) {
     return sizeof(nfc_tag_14a_coll_res_entity_t) + sizeof(nfc_tag_mf1_configure_t) + (get_block_max_by_tag_type(type) * NFC_TAG_MF1_DATA_SIZE);
 }
 
+int nfc_tag_mf1_get_information_size(tag_specific_type_t type) {
+    return get_information_size_by_tag_type(type);
+}
+
 /** @brief MF1's callback before saving data
  * @param type      Refined label type
  * @param buffer    Data buffer

@@ -51,12 +51,17 @@ NRF_LOG_MODULE_REGISTER();
 // Defining soft timers
 APP_TIMER_DEF(m_button_check_timer); // Timer for button debounce
 APP_TIMER_DEF(m_slot_polling_timer); // Timer for slot auto-polling tick
+APP_TIMER_DEF(m_button_led_timer);  // Timer for the hold-to-count LED display
 #define BATTERY_STATUS_DISPLAY_DURATION_MS  5000U
-#define SLOT_POLLING_TICK_MS                100U
+#define SLOT_POLLING_TICK_MS                10U
 
 static uint32_t m_last_btn_press = 0;
 
-static bool m_is_btn_long_press = false;
+static bool m_is_a_btn_long_press = false;
+static bool m_is_a_btn_extra_long_press = false;
+static bool m_is_b_btn_long_press = false;
+static bool m_is_b_btn_extra_long_press = false;
+static bool m_button_led_timer_running = false;
 
 static bool m_is_b_btn_press = false;
 static bool m_is_a_btn_press = false;
@@ -73,7 +78,14 @@ extern bool g_usb_led_marquee_enable;
 // Slot auto-polling state
 static volatile bool m_slot_polling_tick = false;
 static bool m_slot_polling_timer_running = false;
-static uint16_t m_slot_polling_countdown = 0;
+static volatile bool m_reader_switch_pending = false;
+static volatile uint8_t m_reader_target_slot = 0xFF;
+static volatile bool m_reader_select_pending = false;
+static volatile uint8_t m_reader_select_uid[4];
+static volatile bool m_reader_frame_seen = false;
+static bool m_field_was_present = false;
+static uint32_t m_field_last_activity = 0;
+static uint8_t m_smart_sweep_cursor = 0;
 
 static void battery_status_display_restore_slot(void);
 static void battery_status_display_stop(void);
@@ -226,31 +238,96 @@ static void button_pin_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t a
  * @param None
  * @return None
  */
+static bool button_has_any_function(char which) {
+    return settings_get_button_press_config(which) != SettingsButtonDisable ||
+           settings_get_long_button_press_config(which) != SettingsButtonDisable ||
+           settings_get_extra_long_button_press_config(which) != SettingsButtonDisable;
+}
+
+static void button_led_timer_handler(void *arg) {
+    (void)arg;
+    if (!m_is_a_btn_press && !m_is_b_btn_press) {
+        return;
+    }
+    if (m_is_field_on || m_battery_status_display_active) {
+        return;
+    }
+
+    uint32_t now = app_timer_cnt_get();
+    uint32_t elapsed = app_timer_cnt_diff_compute(now, m_last_btn_press);
+    if (elapsed < APP_TIMER_TICKS(1000U)) {
+        return;
+    }
+    uint8_t leds = 0;
+    for (uint8_t s = 1; s <= RGB_LIST_NUM; s++) {
+        if (elapsed >= APP_TIMER_TICKS((uint32_t)s * 1000U)) {
+            leds = s;
+        } else {
+            break;
+        }
+    }
+
+    set_slot_light_color(get_color_by_slot(tag_emulation_get_slot()));
+    uint32_t *led_pins = hw_get_led_array();
+    for (uint8_t i = 0; i < RGB_LIST_NUM; i++) {
+        if (i < leds) {
+            nrf_gpio_pin_set(led_pins[i]);
+        } else {
+            nrf_gpio_pin_clear(led_pins[i]);
+        }
+    }
+}
+
 static void timer_button_event_handle(void *arg) {
+    nrf_drv_gpiote_pin_t pin = *(nrf_drv_gpiote_pin_t *)arg;
+
     // if button press during shutdown, it's only to wake up quickly
     if (m_system_off_processing) {
         m_system_off_processing = false;
         NRF_LOG_INFO("BUTTON press during shutdown");
+        // The wake-up press must still start the press timer, otherwise the
+        // release cannot be measured and long / extra-long presses are lost.
+        m_last_btn_press = app_timer_cnt_get();
+        if (pin == BUTTON_1) {
+            m_is_b_btn_press = true;
+        } else if (pin == BUTTON_2) {
+            m_is_a_btn_press = true;
+        }
         return;
     }
-
-    nrf_drv_gpiote_pin_t pin = *(nrf_drv_gpiote_pin_t *)arg;
 
     // Check here if the current GPIO is at the pressed level
     if (nrf_gpio_pin_read(pin) == 1) {
         if (pin == BUTTON_1) {
             // If button is disabled, we can't dispatch key event.
-            if (settings_get_button_press_config('b') != SettingsButtonDisable) {
-                NRF_LOG_INFO("BUTTON_B_PRESS");
+            if (button_has_any_function('b')) {
+                // Only latch the timestamp on the initial press: GPIO uses
+                // SENSE_TOGGLE, so contact bounce would otherwise restart the
+                // hold timer and demote an extra-long press to a long one.
+                if (!m_is_b_btn_press) {
+                    NRF_LOG_INFO("BUTTON_B_PRESS");
+                    m_last_btn_press = app_timer_cnt_get();
+                }
                 m_is_b_btn_press = true;
-                m_last_btn_press = app_timer_cnt_get();
+                sleep_timer_stop();
+                if (!m_button_led_timer_running) {
+                    app_timer_start(m_button_led_timer, APP_TIMER_TICKS(100), NULL);
+                    m_button_led_timer_running = true;
+                }
             }
         }
         if (pin == BUTTON_2) {
-            if (settings_get_button_press_config('a') != SettingsButtonDisable) {
-                NRF_LOG_INFO("BUTTON_A_PRESS");
+            if (button_has_any_function('a')) {
+                if (!m_is_a_btn_press) {
+                    NRF_LOG_INFO("BUTTON_A_PRESS");
+                    m_last_btn_press = app_timer_cnt_get();
+                }
                 m_is_a_btn_press = true;
-                m_last_btn_press = app_timer_cnt_get();
+                sleep_timer_stop();
+                if (!m_button_led_timer_running) {
+                    app_timer_start(m_button_led_timer, APP_TIMER_TICKS(100), NULL);
+                    m_button_led_timer_running = true;
+                }
             }
         }
     }
@@ -259,33 +336,55 @@ static void timer_button_event_handle(void *arg) {
         uint32_t now = app_timer_cnt_get();
         uint32_t ticks = app_timer_cnt_diff_compute(now, m_last_btn_press);
 
-        bool is_long_press = ticks > APP_TIMER_TICKS(settings_get_long_press_threshold());
+        uint16_t long_ms = settings_get_long_press_threshold();
+        uint16_t extra_ms = settings_get_extra_long_press_threshold();
+        if (extra_ms <= long_ms) {
+            extra_ms = long_ms + 1000;
+        }
+        bool is_extra_long_press = ticks > APP_TIMER_TICKS(extra_ms);
+        bool is_long_press = !is_extra_long_press && ticks > APP_TIMER_TICKS(long_ms);
 
         if (pin == BUTTON_1 && m_is_b_btn_press == true) {
             // If button is disabled, we can't dispatch key event.
-            if (settings_get_button_press_config('b') != SettingsButtonDisable) {
+            if (button_has_any_function('b')) {
                 m_is_b_btn_release = true;
                 m_is_b_btn_press = false;
-                if (!is_long_press) {
+                if (is_extra_long_press) {
+                    NRF_LOG_INFO("BUTTON_B_RELEASE_EXTRA_LONG");
+                } else if (!is_long_press) {
                     NRF_LOG_INFO("BUTTON_B_RELEASE_SHORT");
                 } else {
                     NRF_LOG_INFO("BUTTON_B_RELEASE_LONG");
                 }
-                m_is_btn_long_press = is_long_press;
+                m_is_b_btn_long_press = is_long_press;
+                m_is_b_btn_extra_long_press = is_extra_long_press;
             }
         }
         if (pin == BUTTON_2 && m_is_a_btn_press == true) {
-            if (settings_get_button_press_config('a') != SettingsButtonDisable) {
+            if (button_has_any_function('a')) {
                 m_is_a_btn_release = true;
                 m_is_a_btn_press = false;
-                if (!is_long_press) {
+                if (is_extra_long_press) {
+                    NRF_LOG_INFO("BUTTON_A_RELEASE_EXTRA_LONG");
+                } else if (!is_long_press) {
                     NRF_LOG_INFO("BUTTON_A_RELEASE_SHORT");
                 } else {
                     NRF_LOG_INFO("BUTTON_A_RELEASE_LONG");
                 }
-                m_is_btn_long_press = is_long_press;
+                m_is_a_btn_long_press = is_long_press;
+                m_is_a_btn_extra_long_press = is_extra_long_press;
             }
         }
+    }
+
+    if (!m_is_a_btn_press && !m_is_b_btn_press && m_button_led_timer_running) {
+        app_timer_stop(m_button_led_timer);
+        m_button_led_timer_running = false;
+        if (!m_is_field_on) {
+            rgb_marquee_stop();
+            light_up_by_slot();
+        }
+        sleep_timer_start(SLEEP_DELAY_MS_BUTTON_CLICK);
     }
 }
 
@@ -300,6 +399,9 @@ static void button_init(void) {
 
     // Slot auto-polling tick timer (started/stopped on demand)
     err_code = app_timer_create(&m_slot_polling_timer, APP_TIMER_MODE_REPEATED, slot_polling_timer_handler);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = app_timer_create(&m_button_led_timer, APP_TIMER_MODE_REPEATED, button_led_timer_handler);
     APP_ERROR_CHECK(err_code);
 
     // Configure SENSE mode, select false for sense configuration
@@ -343,7 +445,8 @@ static void system_off_enter(void) {
         // Power off animation
         uint8_t animation_config = settings_get_animation_config();
         uint8_t slot = tag_emulation_get_slot();
-        uint8_t dir = slot > 3 ? 1 : 0;
+        uint8_t led_slot = slot % RGB_LIST_NUM;
+        uint8_t dir = led_slot > 3 ? 1 : 0;
         uint8_t color = get_color_by_slot(slot);
         if (m_reset_source & (NRF_POWER_RESETREAS_NFC_MASK | NRF_POWER_RESETREAS_LPCOMP_MASK)) {
             if (m_reset_source & NRF_POWER_RESETREAS_NFC_MASK) {
@@ -353,15 +456,15 @@ static void system_off_enter(void) {
             }
         }
         if (animation_config == SettingsAnimationModeFull) {
-            if (m_system_off_processing) rgb_marquee_sweep_from_to(color, slot, dir ? 7 : 0);
+            if (m_system_off_processing) rgb_marquee_sweep_from_to(color, led_slot, dir ? 7 : 0);
             if (m_system_off_processing) rgb_marquee_sweep_fade(color, dir, 7, 99, 75);
             if (m_system_off_processing) rgb_marquee_sweep_fade(color, !dir, 7, 75, 50);
             if (m_system_off_processing) rgb_marquee_sweep_fade(color, dir, 7, 50, 25);
             if (m_system_off_processing) rgb_marquee_sweep_fade(color, !dir, 7, 25, 0);
         } else if (animation_config == SettingsAnimationModeMinimal) {
-            if (m_system_off_processing) rgb_marquee_sweep_from_to(color, slot, !dir ? 7 : 0);
+            if (m_system_off_processing) rgb_marquee_sweep_from_to(color, led_slot, !dir ? 7 : 0);
         } else if (animation_config == SettingsAnimationModeSymmetric) {
-            if (m_system_off_processing) rgb_marquee_symmetric_in(color, slot);
+            if (m_system_off_processing) rgb_marquee_symmetric_in(color, led_slot);
         }
         rgb_marquee_stop();
         if (!m_system_off_processing) {
@@ -493,7 +596,8 @@ static void check_wakeup_src(void) {
      */
 
     uint8_t slot = tag_emulation_get_slot();
-    uint8_t dir = slot > 3 ? 1 : 0;
+    uint8_t led_slot = slot % RGB_LIST_NUM;
+    uint8_t dir = led_slot > 3 ? 1 : 0;
     uint8_t color = get_color_by_slot(slot);
 
     if (m_reset_source & NRF_POWER_RESETREAS_OFF_MASK) {
@@ -505,11 +609,11 @@ static void check_wakeup_src(void) {
         if (animation_config == SettingsAnimationModeFull) {
             rgb_marquee_sweep_to(color, !dir, 11);
             rgb_marquee_sweep_to(color, dir, 11);
-            rgb_marquee_sweep_to(color, !dir, dir ? slot : 7 - slot);
+            rgb_marquee_sweep_to(color, !dir, dir ? led_slot : 7 - led_slot);
         } else if (animation_config == SettingsAnimationModeMinimal) {
-            rgb_marquee_sweep_to(color, !dir, dir ? slot : 7 - slot);
+            rgb_marquee_sweep_to(color, !dir, dir ? led_slot : 7 - led_slot);
         } else if (animation_config == SettingsAnimationModeSymmetric) {
-            rgb_marquee_symmetric_out(color, slot);
+            rgb_marquee_symmetric_out(color, led_slot);
         } else {
             set_slot_light_color(color);
         }
@@ -542,9 +646,9 @@ static void check_wakeup_src(void) {
         uint8_t animation_config = settings_get_animation_config();
         if (animation_config == SettingsAnimationModeFull) {
             // In the case of field wake-up, only one round of RGB is swept as the power-on animation
-            rgb_marquee_sweep_to(color, !dir, dir ? slot : 7 - slot);
+            rgb_marquee_sweep_to(color, !dir, dir ? led_slot : 7 - led_slot);
         } else if (animation_config == SettingsAnimationModeSymmetric) {
-            rgb_marquee_symmetric_out(color, slot);
+            rgb_marquee_symmetric_out(color, led_slot);
         } else {
             set_slot_light_color(color);
         }
@@ -618,23 +722,41 @@ static uint8_t slot_group_size_active(void) {
  *        search is constrained to the group of slot_now.
  */
 static uint8_t slot_find_neighbor(uint8_t slot_now, bool dec) {
+    uint8_t count = tag_emulation_get_slot_count();
+    uint8_t limit = (count < RGB_LIST_NUM) ? count : RGB_LIST_NUM;
+    if (limit == 0) {
+        return slot_now;
+    }
+
+    // Card groups still apply, but only while the whole group is inside the
+    // 8 LEDs; otherwise fall through to the LED-safe full circle.
     uint8_t gs = slot_group_size_active();
-    if (gs == 0) {
-        if (dec) {
-            return tag_emulation_slot_find_prev(slot_now);
-        } else {
-            return tag_emulation_slot_find_next(slot_now);
+    if (gs != 0) {
+        uint8_t base = (slot_now / gs) * gs;
+        if (base < limit) {
+            for (uint8_t i = 1; i <= gs; i++) {
+                uint8_t offset = (slot_now - base + (dec ? (gs - i) : i)) % gs;
+                uint8_t candidate = base + offset;
+                if (candidate == slot_now || candidate >= limit) {
+                    continue;
+                }
+                if (is_slot_enabled(candidate, TAG_SENSE_HF) || is_slot_enabled(candidate, TAG_SENSE_LF)) {
+                    return candidate;
+                }
+            }
         }
     }
-    uint8_t base = (slot_now / gs) * gs;
-    for (uint8_t i = 1; i <= gs; i++) {
-        uint8_t offset = (slot_now - base + (dec ? (gs - i) : i)) % gs;
-        uint8_t candidate = base + offset;
-        if (candidate == slot_now) {
-            continue;
+
+    // Manual button cycling stays within the first RGB_LIST_NUM slots so the
+    // slot LED always identifies the active slot.
+    uint8_t i = (slot_now < limit) ? slot_now : (dec ? 0 : limit - 1);
+    for (uint8_t n = 0; n < limit; n++) {
+        i = dec ? (i == 0 ? limit - 1 : i - 1) : (i + 1 == limit ? 0 : i + 1);
+        if (i == slot_now) {
+            break;
         }
-        if (is_slot_enabled(candidate, TAG_SENSE_HF) || is_slot_enabled(candidate, TAG_SENSE_LF)) {
-            return candidate;
+        if (is_slot_enabled(i, TAG_SENSE_HF) || is_slot_enabled(i, TAG_SENSE_LF)) {
+            return i;
         }
     }
     return slot_now;
@@ -674,11 +796,15 @@ static void cycle_slot_group(void) {
         return;
     }
     uint8_t slot_now = tag_emulation_get_slot();
-    uint8_t groups = 8 / gs;
+    uint8_t count = tag_emulation_get_slot_count();
+    uint8_t groups = (count + gs - 1) / gs;
     for (uint8_t g = 1; g < groups; g++) {
         uint8_t base = (((slot_now / gs) + g) % groups) * gs;
         for (uint8_t i = 0; i < gs; i++) {
             uint8_t candidate = base + i;
+            if (candidate >= count) {
+                continue;
+            }
             if (is_slot_enabled(candidate, TAG_SENSE_HF) || is_slot_enabled(candidate, TAG_SENSE_LF)) {
                 switch_to_slot(slot_now, candidate);
                 return;
@@ -691,8 +817,9 @@ static void cycle_slot_group(void) {
 
 static void battery_status_display_restore_slot(void) {
     uint8_t slot = tag_emulation_get_slot();
+    uint8_t led_slot = slot % RGB_LIST_NUM;
     uint8_t color = get_color_by_slot(slot);
-    uint8_t dir = slot > 3 ? 1 : 0;
+    uint8_t dir = led_slot > 3 ? 1 : 0;
 
     rgb_marquee_stop();
     set_slot_light_color(color);
@@ -780,6 +907,8 @@ static void show_battery(void) {
 }
 
 static void play_power_on_animation(uint8_t slot, uint8_t dir, uint8_t color) {
+    // There are only RGB_LIST_NUM LEDs; fold the logical slot onto the LED ring.
+    slot %= RGB_LIST_NUM;
     uint8_t animation_config = settings_get_animation_config();
     if (animation_config == SettingsAnimationModeFull) {
         rgb_marquee_sweep_to(color, !dir, 11);
@@ -824,7 +953,10 @@ static bool battery_status_display_cancel_on_button(void) {
     m_is_b_btn_release = false;
     m_is_a_btn_press = false;
     m_is_b_btn_press = false;
-    m_is_btn_long_press = false;
+    m_is_a_btn_long_press = false;
+    m_is_a_btn_extra_long_press = false;
+    m_is_b_btn_long_press = false;
+    m_is_b_btn_extra_long_press = false;
     battery_status_display_stop();
     return true;
 }
@@ -838,6 +970,7 @@ static void battery_status_display_on_button_cancel(void) {
 
 static void offline_status_blink_color(uint8_t blink_color) {
     uint8_t slot = tag_emulation_get_slot();
+    uint8_t led_slot = slot % RGB_LIST_NUM;
 
     uint8_t color = get_color_by_slot(slot);
 
@@ -846,7 +979,7 @@ static void offline_status_blink_color(uint8_t blink_color) {
     set_slot_light_color(blink_color);
 
     for (uint8_t i = 0; i < RGB_LIST_NUM; i++) {
-        if (i == slot) {
+        if (i == led_slot) {
             continue;
         }
         nrf_gpio_pin_set(p_led_array[i]);
@@ -872,6 +1005,7 @@ static void offline_status_ok(void) {
  */
 static void full_clone_led_indicate(uint8_t color, uint8_t times) {
     uint8_t slot = tag_emulation_get_slot();
+    uint8_t led_slot = slot % RGB_LIST_NUM;
     uint8_t base_color = get_color_by_slot(slot);
 
     uint32_t *p_led_array = hw_get_led_array();
@@ -879,9 +1013,9 @@ static void full_clone_led_indicate(uint8_t color, uint8_t times) {
     set_slot_light_color(color);
     for (uint8_t round = 0; round < 3; round++) {
         for (uint8_t i = 0; i < times; i++) {
-            nrf_gpio_pin_set(p_led_array[slot]);
+            nrf_gpio_pin_set(p_led_array[led_slot]);
             bsp_delay_ms(120);
-            nrf_gpio_pin_clear(p_led_array[slot]);
+            nrf_gpio_pin_clear(p_led_array[led_slot]);
             bsp_delay_ms(120);
         }
         bsp_delay_ms(400);
@@ -920,7 +1054,7 @@ static void btn_fn_full_clone(void) {
     rgb_marquee_stop();
     set_slot_light_color(RGB_BLUE);
     uint32_t *led_pins = hw_get_led_array();
-    nrf_gpio_pin_set(led_pins[slot_now]);
+    nrf_gpio_pin_set(led_pins[slot_now % RGB_LIST_NUM]);
 
     uint16_t status = mf1_offline_clone_execute(slot_now);
     (void)status;
@@ -982,7 +1116,12 @@ static void slot_polling_timer_handler(void *arg) {
 /**@brief Start/stop the polling tick timer depending on the settings
  */
 static void slot_polling_timer_update(void) {
-    bool should_run = settings_get_slot_polling_enable();
+    // Field-driven polling: the tick timer only needs to run while a reader
+    // field is present. Without a field the device should stay idle.
+    bool should_run = settings_get_slot_polling_enable() &&
+                      g_is_tag_emulating &&
+                      !m_is_field_on &&
+                      get_device_mode() == DEVICE_MODE_TAG;
     if (should_run && !m_slot_polling_timer_running) {
         app_timer_start(m_slot_polling_timer, APP_TIMER_TICKS(SLOT_POLLING_TICK_MS), NULL);
         m_slot_polling_timer_running = true;
@@ -992,26 +1131,69 @@ static void slot_polling_timer_update(void) {
     }
 }
 
-/**@brief Process a slot auto-polling tick in main loop context.
- *        Polling is paused whenever a reader is actually talking to the
- *        emulated card (g_is_tag_emulating), while the battery status is
- *        shown, while the field generator is on or while an offline clone
- *        job is running.
+/**@brief Reader-frame hook for smart polling.
+ *
+ * This runs in the NFCT receive path before the tag state machine. It only
+ * records slot-selection hints; the actual slot switch is done in main-loop
+ * context by slot_polling_process().
  */
-static void slot_polling_process(void) {
-    if (!m_slot_polling_tick) {
+static void slot_reader_event(const uint8_t *data, uint16_t bits) {
+    if (data == NULL) {
         return;
     }
-    m_slot_polling_tick = false;
+    m_reader_frame_seen = true;
+    if (!settings_get_smart_polling_enable()) {
+        return;
+    }
 
+    // ISO14443A HALT / REQA / WUPA: end or start of a reader session.
+    if (bits >= 16 && data[0] == 0x50 && data[1] == 0x00) {
+        m_reader_switch_pending = true;
+        return;
+    }
+    if (bits == 7 && (data[0] == 0x26 || data[0] == 0x52)) {
+        if (m_reader_target_slot != 0xFF) {
+            m_reader_switch_pending = true;
+        }
+        return;
+    }
+
+    // SELECT CL1/CL2/CL3 with a 4-byte UID (single-size NFCID1).
+    if (bits >= 72 && (data[0] == 0x93 || data[0] == 0x95 || data[0] == 0x97) &&
+            data[1] == 0x70) {
+        m_reader_select_uid[0] = data[2];
+        m_reader_select_uid[1] = data[3];
+        m_reader_select_uid[2] = data[4];
+        m_reader_select_uid[3] = data[5];
+        m_reader_select_pending = true;
+        return;
+    }
+
+    // MF1 authentication/read/write traffic: refresh MRU and remember the
+    // sector the reader is interested in.
+    if (bits >= 16 && (data[0] == 0x60 || data[0] == 0x61 || data[0] == 0x30 ||
+                       data[0] == 0xA0 || data[0] == 0xA1)) {
+        uint8_t current = tag_emulation_get_slot();
+        tag_emulation_slot_mru_touch(current);
+        if (data[0] == 0x60 || data[0] == 0x61) {
+            tag_emulation_slot_note_auth(current, data[1]);
+        }
+    }
+}
+
+/**@brief Field-driven slot polling.
+ *
+ * v3.1 only polls while a reader field is present. The slot switch happens
+ * inside the reader session (after HALT/REQA or when the field has been idle
+ * for the configured interval), using a live switch that does not stop NFC
+ * sense. With no field, this function does nothing.
+ */
+static void slot_polling_process(void) {
     if (!settings_get_slot_polling_enable()) {
         return;
     }
-    // never switch slots while a reader is talking to the emulated card,
-    // while the device is busy in reader mode / field generator or while
-    // the battery status is shown
-    if (m_is_field_on || m_battery_status_display_active || g_is_tag_emulating ||
-        get_device_mode() != DEVICE_MODE_TAG) {
+    if (m_is_field_on || m_battery_status_display_active ||
+            get_device_mode() != DEVICE_MODE_TAG) {
         return;
     }
 #if defined(PROJECT_CHAMELEON_ULTRA)
@@ -1020,24 +1202,99 @@ static void slot_polling_process(void) {
     }
 #endif
 
-    if (++m_slot_polling_countdown < settings_get_slot_polling_interval()) {
+    uint32_t now = app_timer_cnt_get();
+
+    // No reader field: v3.1 does not poll. Drop any session hints.
+    if (!g_is_tag_emulating) {
+        m_field_was_present = false;
+        m_reader_switch_pending = false;
+        m_reader_target_slot = 0xFF;
+        m_reader_select_pending = false;
+        m_reader_frame_seen = false;
         return;
     }
-    m_slot_polling_countdown = 0;
 
-    uint8_t mask = settings_get_slot_polling_slot_mask();
+    if (!m_field_was_present) {
+        m_field_was_present = true;
+        m_field_last_activity = now;
+    }
+    if (m_reader_frame_seen) {
+        m_reader_frame_seen = false;
+        m_field_last_activity = now;
+    }
+
+    uint8_t count = tag_emulation_get_slot_count();
+
+    // Resolve a reader SELECT UID in main-loop context (not in the NFCT ISR).
+    if (settings_get_smart_polling_enable() && m_reader_select_pending) {
+        m_reader_select_pending = false;
+        uint8_t current = tag_emulation_get_slot();
+        uint8_t slot = tag_emulation_find_slot_by_uid((const uint8_t *)m_reader_select_uid, 4);
+        if (slot == current) {
+            m_reader_target_slot = 0xFF;
+            tag_emulation_slot_mru_touch(current);
+        } else if (slot != 0xFF) {
+            // The reader selected another known UID; switch there on the next
+            // REQA/HALT rather than disturbing the current frame.
+            m_reader_target_slot = slot;
+        }
+    }
+
+    // Reader HALT/REQA asks for the next candidate immediately.
+    if (settings_get_smart_polling_enable() && m_reader_switch_pending) {
+        m_reader_switch_pending = false;
+        uint8_t slot_now = tag_emulation_get_slot();
+        uint8_t target = m_reader_target_slot;
+        m_reader_target_slot = 0xFF;
+        if (target == 0xFF) {
+            target = tag_emulation_slot_next_smart(slot_now, &m_smart_sweep_cursor);
+        }
+        if (target != slot_now && target < count) {
+            tag_emulation_change_slot_live(target);
+        }
+        m_field_last_activity = now;
+        return;
+    }
+
+    if (!m_slot_polling_tick) {
+        return;
+    }
+    m_slot_polling_tick = false;
+
+    // Field-present timeout: no reader frame for the configured interval.
+    uint32_t interval_ticks = APP_TIMER_TICKS(
+        (uint32_t)settings_get_slot_polling_interval() * 10U);
+    if (app_timer_cnt_diff_compute(now, m_field_last_activity) < interval_ticks) {
+        return;
+    }
+    m_field_last_activity = now;
+
     uint8_t slot_now = tag_emulation_get_slot();
+
+    if (settings_get_smart_polling_enable()) {
+        uint8_t target = m_reader_target_slot;
+        m_reader_target_slot = 0xFF;
+        if (target == 0xFF) {
+            target = tag_emulation_slot_next_sweep(slot_now, &m_smart_sweep_cursor);
+        }
+        if (target != slot_now && target < count) {
+            tag_emulation_change_slot_live(target);
+        }
+        return;
+    }
+
+    const uint8_t *mask = settings_get_slot_polling_slot_mask();
     // polling ignores card groups and cycles through all masked slots
-    for (uint8_t i = 1; i <= 8; i++) {
-        uint8_t candidate = (slot_now + i) % 8;
-        if (!(mask & (1u << candidate))) {
+    for (uint16_t i = 1; i <= count; i++) {
+        uint8_t candidate = (uint8_t)((slot_now + i) % count);
+        if (!(mask[candidate >> 3] & (1u << (candidate & 7)))) {
             continue;
         }
         if (candidate == slot_now) {
             break; // only our own slot is masked/enabled
         }
         if (is_slot_enabled(candidate, TAG_SENSE_HF) || is_slot_enabled(candidate, TAG_SENSE_LF)) {
-            switch_to_slot(slot_now, candidate);
+            tag_emulation_change_slot_live(candidate);
             return;
         }
     }
@@ -1338,6 +1595,19 @@ static void run_button_function_by_settings(settings_button_function_t sbf) {
     }
 }
 
+static void run_button_function_guarded(settings_button_function_t sbf) {
+    static uint32_t last_tick = 0;
+    static settings_button_function_t last_sbf = SettingsButtonDisable;
+    uint32_t now = app_timer_cnt_get();
+    if (sbf != SettingsButtonDisable && sbf == last_sbf &&
+        app_timer_cnt_diff_compute(now, last_tick) < APP_TIMER_TICKS(300)) {
+        return;
+    }
+    last_sbf = sbf;
+    last_tick = now;
+    run_button_function_by_settings(sbf);
+}
+
 /**@brief button press event process
  */
 static void button_press_process(void) {
@@ -1345,23 +1615,33 @@ static void button_press_process(void) {
     if (m_is_b_btn_release || m_is_a_btn_release) {
         if (battery_status_display_cancel_on_button()) {
             battery_status_display_on_button_cancel();
+            m_is_a_btn_release = false;
+            m_is_b_btn_release = false;
+            m_is_a_btn_extra_long_press = false;
+            m_is_b_btn_extra_long_press = false;
             return;
         }
         if (m_is_a_btn_release) {
-            if (!m_is_btn_long_press) {
-                run_button_function_by_settings(settings_get_button_press_config('a'));
+            if (m_is_a_btn_extra_long_press) {
+                run_button_function_guarded(settings_get_extra_long_button_press_config('a'));
+            } else if (!m_is_a_btn_long_press) {
+                run_button_function_guarded(settings_get_button_press_config('a'));
             } else {
-                run_button_function_by_settings(settings_get_long_button_press_config('a'));
+                run_button_function_guarded(settings_get_long_button_press_config('a'));
             }
             m_is_a_btn_release = false;
+            m_is_a_btn_extra_long_press = false;
         }
         if (m_is_b_btn_release) {
-            if (!m_is_btn_long_press) {
-                run_button_function_by_settings(settings_get_button_press_config('b'));
+            if (m_is_b_btn_extra_long_press) {
+                run_button_function_guarded(settings_get_extra_long_button_press_config('b'));
+            } else if (!m_is_b_btn_long_press) {
+                run_button_function_guarded(settings_get_button_press_config('b'));
             } else {
-                run_button_function_by_settings(settings_get_long_button_press_config('b'));
+                run_button_function_guarded(settings_get_long_button_press_config('b'));
             }
             m_is_b_btn_release = false;
+            m_is_b_btn_extra_long_press = false;
         }
         // Disable led marquee for usb at button pressed.
         g_usb_led_marquee_enable = false;
@@ -1376,7 +1656,7 @@ extern bool g_usb_port_opened;
 static void blink_usb_led_status(void) {
     uint8_t slot = tag_emulation_get_slot();
     uint8_t color = get_color_by_slot(slot);
-    uint8_t dir = slot > 3 ? 1 : 0;
+    uint8_t dir = (slot % RGB_LIST_NUM) > 3 ? 1 : 0;
     static bool is_working = false;
     if (nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED) {
         if (is_working) {
@@ -1446,6 +1726,7 @@ int main(void) {
     button_init();            // Button initialization for handling business logic
     sleep_timer_init();       // Soft timer initialization for hibernation
     tag_emulation_init();     // Analog card initialization
+    nfc_tag_14a_set_reader_event_cb(slot_reader_event);
     rgb_marquee_init();       // Light effect initialization
 
     ble_passkey_init();       // init ble connect key.

@@ -88,9 +88,19 @@ typedef void (*nfc_tag_14a_reset_handler_t)(void);
  * data    : raw frame bytes (after parity strip)
  * szBits  : number of bits received */
 typedef void (*nfc_tag_14a_sniff_cb_t)(const uint8_t *data, uint16_t szBits);
+// Persistent reader-frame hook for polling/slot selection. Runs before the tag
+// state machine, so it must only record events and must not block.
+typedef nfc_tag_14a_sniff_cb_t nfc_tag_14a_reader_event_cb_t;
 
 void nfc_tag_14a_set_sniff_cb(nfc_tag_14a_sniff_cb_t cb);
 void nfc_tag_14a_clear_sniff_cb(void);
+void nfc_tag_14a_set_reader_event_cb(nfc_tag_14a_reader_event_cb_t cb);
+void nfc_tag_14a_clear_reader_event_cb(void);
+// Collision response of the currently loaded tag, or NULL when none is active.
+nfc_tag_14a_coll_res_reference_t *nfc_tag_14a_get_active_coll_res(void);
+// Reset the 14A protocol state after swapping the active slot's data while the
+// reader field is still present (do not stop/restart NFCT).
+void nfc_tag_14a_slot_switched(void);
 
 /* TX sniff callback — fires at TX_FRAMESTART with the frame the tag is about
  * to send (card→reader direction).  Same signature as the RX sniff callback.

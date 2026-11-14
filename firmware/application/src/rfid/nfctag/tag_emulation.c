@@ -10,6 +10,7 @@
 #include "nfc_14a_4.h"
 #include "nfc_seos.h"
 #include "rgb_marquee.h"
+#include "settings.h"
 #include "tag_persistence.h"
 
 #define NRF_LOG_MODULE_NAME tag_emu
@@ -60,14 +61,16 @@ static uint16_t m_tag_data_hf_crc;
 static tag_data_buffer_t m_tag_data_hf = {sizeof(m_tag_data_buffer_hf), m_tag_data_buffer_hf, &m_tag_data_hf_crc};
 
 /**
- * Eight card slots, each card slot has its own unique configuration
+ * Up to 255 card slots, visible slot count is dynamic (default 8)
  */
 static tag_slot_config_t slotConfig ALIGN_U32 = {
     // Configure activated card slot, default activation of the 0th card slot (the first card)
     .version = TAG_SLOT_CONFIG_CURRENT_VERSION,
     .active_slot = 0,
+    .slot_count = TAG_SLOT_COUNT_MIN,
     // Configuration card slots
-    // See tag_emulation_factory_init for actual tag content
+    // See tag_emulation_factory_init for actual tag content.
+    // Slots not listed here keep the zero initializer: disabled and TAG_TYPE_UNDEFINED.
     .slots = {
         { .enabled_hf = true,  .enabled_lf = true,  .tag_hf = TAG_TYPE_MIFARE_1024, .tag_lf = TAG_TYPE_EM410X,    },  // 1
         { .enabled_hf = true,  .enabled_lf = false, .tag_hf = TAG_TYPE_MF0ICU1,     .tag_lf = TAG_TYPE_UNDEFINED, },  // 2
@@ -81,6 +84,13 @@ static tag_slot_config_t slotConfig ALIGN_U32 = {
 };
 // The card slot configuration unique CRC, once the slot configuration changes, can be checked by CRC
 static uint16_t m_slot_config_crc;
+
+// Compact per-slot metadata cache and MRU list for smart polling.
+static tag_slot_meta_t m_slot_meta[TAG_MAX_SLOT_NUM];
+static uint8_t m_mru[TAG_SLOT_MRU_MAX];
+static uint8_t m_mru_count;
+static uint8_t m_smart_round;
+static uint8_t m_last_reader_sector = 0xFF;
 
 // ********************** Specific parameter ends **********************
 
@@ -325,6 +335,8 @@ void tag_emulation_load_data(void) {
     uint8_t slot = tag_emulation_get_slot();
     load_data_by_tag_type(slot, slotConfig.slots[slot].tag_hf);
     load_data_by_tag_type(slot, slotConfig.slots[slot].tag_lf);
+    tag_emulation_slot_mru_touch(slot);
+    tag_emulation_slot_meta_update(slot);
 }
 
 /**
@@ -334,6 +346,7 @@ void tag_emulation_save_data(void) {
     uint8_t slot = tag_emulation_get_slot();
     save_data_by_tag_type(slot, slotConfig.slots[slot].tag_hf);
     save_data_by_tag_type(slot, slotConfig.slots[slot].tag_lf);
+    tag_emulation_slot_meta_update(slot);
 }
 
 /**
@@ -440,16 +453,20 @@ void tag_emulation_sense_switch(tag_sense_type_t type, bool enable) {
     }
 }
 
+// Layout written by slot config version 8 (8 slots, 68 bytes).
+#define TAG_SLOT_CONFIG_V8_SLOT_NUM 8
+#define TAG_SLOT_CONFIG_V8_SIZE     68
+
 static void tag_emulation_migrate_slot_config_v0_to_v8(void) {
     // Copy old slotConfig content
-    uint8_t tmpbuf[sizeof(slotConfig)];
+    uint8_t tmpbuf[TAG_SLOT_CONFIG_V8_SIZE];
     memcpy(tmpbuf, (uint8_t *)&slotConfig, sizeof(tmpbuf));
     NRF_LOG_INFO("Migrating slotConfig v0...");
     NRF_LOG_HEXDUMP_INFO(tmpbuf, sizeof(tmpbuf));
     // Populate new slotConfig struct
     slotConfig.version = TAG_SLOT_CONFIG_CURRENT_VERSION;
     slotConfig.active_slot = tmpbuf[0];
-    for (uint8_t i = 0; i < ARRAYLEN(slotConfig.slots); i++) {
+    for (uint8_t i = 0; i < TAG_SLOT_CONFIG_V8_SLOT_NUM; i++) {
         bool enabled = tmpbuf[4 + (i * 4)] & 1;
 
         slotConfig.slots[i].tag_hf = tmpbuf[4 + (i * 4) + 2];
@@ -473,7 +490,8 @@ static void tag_emulation_migrate_slot_config_v0_to_v8(void) {
 }
 
 static void tag_emulation_migrate_slot_config(void) {
-    switch (slotConfig.version) {
+    uint8_t from_version = slotConfig.version;
+    switch (from_version) {
         case 0:
         case 1:
         case 2:
@@ -483,6 +501,20 @@ static void tag_emulation_migrate_slot_config(void) {
         case 6:
         case 7:
             tag_emulation_migrate_slot_config_v0_to_v8();
+            /* fall through */
+        case 8:
+        case 9: {
+            // v8 had 8 slots; v9 was the fixed 32-slot build. Everything above
+            // the previous count starts disabled and can be added on demand.
+            uint8_t count = (from_version == 9) ? 32 : TAG_SLOT_COUNT_MIN;
+            for (uint16_t i = count; i < TAG_MAX_SLOT_NUM; i++) {
+                slotConfig.slots[i].enabled_hf = false;
+                slotConfig.slots[i].enabled_lf = false;
+                slotConfig.slots[i].tag_hf = TAG_TYPE_UNDEFINED;
+                slotConfig.slots[i].tag_lf = TAG_TYPE_UNDEFINED;
+            }
+            slotConfig.slot_count = count;
+            slotConfig.version = TAG_SLOT_CONFIG_CURRENT_VERSION;
 
             /*
              * Add new migration steps ABOVE THIS COMMENT
@@ -491,10 +523,12 @@ static void tag_emulation_migrate_slot_config(void) {
              */
 
             tag_emulation_save_config();
+            break;
+        }
         case TAG_SLOT_CONFIG_CURRENT_VERSION:
             break;
         default:
-            NRF_LOG_ERROR("Unsupported slotConfig migration attempted! (%d -> %d)", slotConfig.version, TAG_SLOT_CONFIG_CURRENT_VERSION);
+            NRF_LOG_ERROR("Unsupported slotConfig migration attempted! (%d -> %d)", from_version, TAG_SLOT_CONFIG_CURRENT_VERSION);
             break;
     }
 }
@@ -560,6 +594,7 @@ void tag_emulation_sense_end(void) {
  */
 void tag_emulation_init(void) {
     tag_emulation_load_config();  // Configuration of loading the card slot of the emulation card
+    tag_emulation_slot_meta_init();
     tag_emulation_load_data();    // Load the data of the emulated card
 }
 
@@ -571,18 +606,331 @@ void tag_emulation_save(void) {
     tag_emulation_save_data();    // Save card slot data
 }
 
+uint8_t tag_emulation_get_slot_count(void) {
+    uint8_t count = slotConfig.slot_count;
+    if (count < TAG_SLOT_COUNT_MIN) {
+        count = TAG_SLOT_COUNT_MIN;
+    }
+    if (count > TAG_MAX_SLOT_NUM) {
+        count = TAG_MAX_SLOT_NUM;
+    }
+    return count;
+}
+
+/**
+ * Load the compact per-slot metadata records from FDS.
+ *
+ * Existing card dumps predate the metadata record, so for HF types whose
+ * persistent layout starts with the 14A collision response (MF1/MF0/NTAG/
+ * HF14A-4) the UID is also preloaded from the saved dump at boot.
+ */
+void tag_emulation_slot_meta_init(void) {
+    uint8_t count = tag_emulation_get_slot_count();
+    memset(m_slot_meta, 0, sizeof(m_slot_meta));
+    for (uint16_t slot = 0; slot < count; slot++) {
+        uint16_t length = sizeof(m_slot_meta[slot]);
+        if (!fds_read_sync(FDS_SLOT_META_FILE_ID_BASE + slot, 1, &length,
+                           (uint8_t *)&m_slot_meta[slot]) ||
+                length < sizeof(m_slot_meta[slot])) {
+            memset(&m_slot_meta[slot], 0, sizeof(m_slot_meta[slot]));
+        }
+    }
+
+    for (uint16_t slot = 0; slot < count; slot++) {
+        tag_slot_specific_type_t types;
+        tag_emulation_get_specific_types_by_slot((uint8_t)slot, &types);
+        bool layout_has_coll_res =
+            types.tag_hf == TAG_TYPE_MIFARE_Mini ||
+            types.tag_hf == TAG_TYPE_MIFARE_1024 ||
+            types.tag_hf == TAG_TYPE_MIFARE_2048 ||
+            types.tag_hf == TAG_TYPE_MIFARE_4096 ||
+            types.tag_hf == TAG_TYPE_MF0ICU1 ||
+            types.tag_hf == TAG_TYPE_MF0ICU2 ||
+            types.tag_hf == TAG_TYPE_MF0UL11 ||
+            types.tag_hf == TAG_TYPE_MF0UL21 ||
+            types.tag_hf == TAG_TYPE_NTAG_210 ||
+            types.tag_hf == TAG_TYPE_NTAG_212 ||
+            types.tag_hf == TAG_TYPE_NTAG_213 ||
+            types.tag_hf == TAG_TYPE_NTAG_215 ||
+            types.tag_hf == TAG_TYPE_NTAG_216 ||
+            types.tag_hf == TAG_TYPE_HF14A_4;
+        if (!layout_has_coll_res || m_slot_meta[slot].uid_len != 0) {
+            continue;
+        }
+
+        fds_slot_record_map_t map;
+        get_fds_map_by_slot_sense_type_for_dump((uint8_t)slot, TAG_SENSE_HF, &map);
+        uint16_t length = m_tag_data_hf.length;
+        if (!fds_read_sync(map.id, map.key, &length, m_tag_data_hf.buffer) ||
+                length < 16) {
+            continue;
+        }
+
+        tag_slot_meta_t meta = m_slot_meta[slot];
+        uint8_t uid_len = m_tag_data_hf.buffer[0];
+        if (uid_len != 4 && uid_len != 7 && uid_len != 10) {
+            continue;
+        }
+        meta.valid = true;
+        meta.tag_type_hf = types.tag_hf;
+        meta.tag_type_lf = types.tag_lf;
+        meta.uid_len = uid_len;
+        memcpy(meta.uid, &m_tag_data_hf.buffer[4], uid_len);
+        memcpy(meta.atqa, &m_tag_data_hf.buffer[1], sizeof(meta.atqa));
+        meta.sak = m_tag_data_hf.buffer[3];
+        if (memcmp(&meta, &m_slot_meta[slot], sizeof(meta)) != 0) {
+            m_slot_meta[slot] = meta;
+            fds_write_sync(FDS_SLOT_META_FILE_ID_BASE + slot, 1, sizeof(meta), &meta);
+        }
+    }
+}
+
+static bool slot_meta_uid_equal(const tag_slot_meta_t *meta, const uint8_t *uid, uint8_t uid_len) {
+    return meta->valid && meta->uid_len == uid_len && uid_len <= sizeof(meta->uid) &&
+           memcmp(meta->uid, uid, uid_len) == 0;
+}
+
+/**
+ * Best match for a reader SELECT UID. Prefer the most recently used slot when
+ * several slots share a UID (clones); otherwise the first match.
+ */
+uint8_t tag_emulation_find_slot_by_uid(const uint8_t *uid, uint8_t uid_len) {
+    uint8_t count = tag_emulation_get_slot_count();
+    if (uid_len == 0 || uid_len > sizeof(m_slot_meta[0].uid)) {
+        return 0xFF;
+    }
+    // Cloned cards can share a UID. Prefer a slot that recently handled the
+    // same sector the reader is interested in.
+    if (m_last_reader_sector != 0xFF) {
+        for (uint8_t i = 0; i < m_mru_count; i++) {
+            uint8_t slot = m_mru[i];
+            if (slot < count && slot_meta_uid_equal(&m_slot_meta[slot], uid, uid_len) &&
+                    m_slot_meta[slot].last_auth_sector == m_last_reader_sector) {
+                return slot;
+            }
+        }
+        for (uint16_t slot = 0; slot < count; slot++) {
+            if (slot_meta_uid_equal(&m_slot_meta[slot], uid, uid_len) &&
+                    m_slot_meta[slot].last_auth_sector == m_last_reader_sector) {
+                return (uint8_t)slot;
+            }
+        }
+    }
+    for (uint8_t i = 0; i < m_mru_count; i++) {
+        uint8_t slot = m_mru[i];
+        if (slot < count && slot_meta_uid_equal(&m_slot_meta[slot], uid, uid_len)) {
+            return slot;
+        }
+    }
+    for (uint16_t slot = 0; slot < count; slot++) {
+        if (slot_meta_uid_equal(&m_slot_meta[slot], uid, uid_len)) {
+            return (uint8_t)slot;
+        }
+    }
+    return 0xFF;
+}
+
+/**
+ * Update the metadata for one slot from the slot configuration and, when it is
+ * the active slot, from the currently loaded 14A collision response.
+ */
+void tag_emulation_slot_meta_update(uint8_t slot) {
+    uint8_t count = tag_emulation_get_slot_count();
+    if (slot >= count) {
+        return;
+    }
+
+    tag_slot_meta_t meta = m_slot_meta[slot];
+    tag_slot_specific_type_t types;
+    tag_emulation_get_specific_types_by_slot(slot, &types);
+    meta.tag_type_hf = types.tag_hf;
+    meta.tag_type_lf = types.tag_lf;
+    meta.valid = (types.tag_hf != TAG_TYPE_UNDEFINED) || (types.tag_lf != TAG_TYPE_UNDEFINED);
+
+    if (types.tag_hf == TAG_TYPE_UNDEFINED) {
+        meta.uid_len = 0;
+        memset(meta.uid, 0, sizeof(meta.uid));
+        memset(meta.atqa, 0, sizeof(meta.atqa));
+        meta.sak = 0;
+    } else if (slot == tag_emulation_get_slot()) {
+        nfc_tag_14a_coll_res_reference_t *res = nfc_tag_14a_get_active_coll_res();
+        if (res != NULL && res->size != NULL && res->uid != NULL &&
+                res->atqa != NULL && res->sak != NULL) {
+            uint8_t uid_len = *res->size;
+            if (uid_len > sizeof(meta.uid)) {
+                uid_len = sizeof(meta.uid);
+            }
+            meta.uid_len = uid_len;
+            memcpy(meta.uid, res->uid, uid_len);
+            memcpy(meta.atqa, res->atqa, sizeof(meta.atqa));
+            meta.sak = res->sak[0];
+        }
+    }
+
+    if (memcmp(&meta, &m_slot_meta[slot], sizeof(meta)) != 0) {
+        m_slot_meta[slot] = meta;
+        fds_write_sync(FDS_SLOT_META_FILE_ID_BASE + slot, 1, sizeof(meta), &meta);
+    }
+}
+
+/**
+ * Record the sector a reader just tried to authenticate. The block-to-sector
+ * mapping follows MIFARE Classic: sectors 0..31 use 4 blocks, 32..39 use 16.
+ */
+void tag_emulation_slot_note_auth(uint8_t slot, uint8_t block) {
+    if (slot >= tag_emulation_get_slot_count()) {
+        return;
+    }
+    uint8_t sector;
+    if (block < 128) {
+        sector = block / 4;
+    } else {
+        sector = (uint8_t)(24U + block / 16U);
+    }
+    m_slot_meta[slot].last_auth_sector = sector;
+    m_last_reader_sector = sector;
+    tag_emulation_slot_mru_touch(slot);
+}
+
+void tag_emulation_slot_mru_touch(uint8_t slot) {
+    if (slot >= tag_emulation_get_slot_count()) {
+        return;
+    }
+    uint8_t index = m_mru_count;
+    for (uint8_t i = 0; i < m_mru_count; i++) {
+        if (m_mru[i] == slot) {
+            index = i;
+            break;
+        }
+    }
+    if (index == m_mru_count) {
+        if (m_mru_count < TAG_SLOT_MRU_MAX) {
+            m_mru_count++;
+        }
+        index = m_mru_count - 1;
+    }
+    for (uint8_t i = index; i > 0; i--) {
+        m_mru[i] = m_mru[i - 1];
+    }
+    m_mru[0] = slot;
+}
+
+bool tag_emulation_slot_has_data(uint8_t slot) {
+    if (slot >= tag_emulation_get_slot_count()) {
+        return false;
+    }
+    tag_slot_specific_type_t types;
+    tag_emulation_get_specific_types_by_slot(slot, &types);
+    return (types.tag_hf != TAG_TYPE_UNDEFINED) || (types.tag_lf != TAG_TYPE_UNDEFINED);
+}
+
+static bool slot_is_pollable(uint8_t slot, uint8_t current) {
+    if (slot == current || slot >= tag_emulation_get_slot_count() ||
+            !tag_emulation_slot_has_data(slot) ||
+            !settings_get_slot_polling_slot_mask_bit(slot)) {
+        return false;
+    }
+    tag_slot_specific_type_t types;
+    tag_emulation_get_specific_types_by_slot(slot, &types);
+    bool hf_ok = settings_get_ic_polling_enable() &&
+                 types.tag_hf != TAG_TYPE_UNDEFINED &&
+                 is_slot_enabled(slot, TAG_SENSE_HF);
+    bool lf_ok = settings_get_id_polling_enable() &&
+                 types.tag_lf != TAG_TYPE_UNDEFINED &&
+                 is_slot_enabled(slot, TAG_SENSE_LF);
+    return hf_ok || lf_ok;
+}
+
+/**
+ * Pick the next slot for smart polling.
+ * Three out of four calls return the next MRU candidate; every fourth call
+ * performs a full sweep so slots never used since boot are still reachable.
+ */
+uint8_t tag_emulation_slot_next_smart(uint8_t current, uint8_t *sweep_cursor) {
+    uint8_t count = tag_emulation_get_slot_count();
+    bool use_sweep = ((m_smart_round++ & 0x03U) == 0x03U);
+
+    if (!use_sweep) {
+        for (uint8_t i = 0; i < m_mru_count; i++) {
+            uint8_t slot = m_mru[i];
+            if (slot_is_pollable(slot, current)) {
+                return slot;
+            }
+        }
+    }
+
+    if (sweep_cursor != NULL) {
+        for (uint16_t n = 0; n < count; n++) {
+            uint8_t slot = (uint8_t)((*sweep_cursor + n) % count);
+            if (slot_is_pollable(slot, current)) {
+                *sweep_cursor = (uint8_t)((slot + 1) % count);
+                return slot;
+            }
+        }
+    }
+
+    // Fallback: any enabled slot of an enabled sense, even if its data is not
+    // present yet.
+    for (uint16_t n = 0; n < count; n++) {
+        uint8_t slot = (uint8_t)((current + 1 + n) % count);
+        if (slot == current) {
+            continue;
+        }
+        bool hf_ok = settings_get_ic_polling_enable() && is_slot_enabled(slot, TAG_SENSE_HF);
+        bool lf_ok = settings_get_id_polling_enable() && is_slot_enabled(slot, TAG_SENSE_LF);
+        if ((hf_ok || lf_ok) && settings_get_slot_polling_slot_mask_bit(slot)) {
+            return slot;
+        }
+    }
+    return current;
+}
+
+/**
+ * Background sweep: ignore the MRU list so every pollable slot is visited.
+ */
+uint8_t tag_emulation_slot_next_sweep(uint8_t current, uint8_t *sweep_cursor) {
+    uint8_t count = tag_emulation_get_slot_count();
+    if (sweep_cursor != NULL) {
+        for (uint16_t n = 0; n < count; n++) {
+            uint8_t slot = (uint8_t)((*sweep_cursor + n) % count);
+            if (slot_is_pollable(slot, current)) {
+                *sweep_cursor = (uint8_t)((slot + 1) % count);
+                return slot;
+            }
+        }
+    }
+    // Fallback: any enabled slot of an enabled sense.
+    for (uint16_t n = 0; n < count; n++) {
+        uint8_t slot = (uint8_t)((current + 1 + n) % count);
+        if (slot == current) {
+            continue;
+        }
+        bool hf_ok = settings_get_ic_polling_enable() && is_slot_enabled(slot, TAG_SENSE_HF);
+        bool lf_ok = settings_get_id_polling_enable() && is_slot_enabled(slot, TAG_SENSE_LF);
+        if ((hf_ok || lf_ok) && settings_get_slot_polling_slot_mask_bit(slot)) {
+            return slot;
+        }
+    }
+    return current;
+}
+
 /**
  * Get the currently activated card slot index
  */
 uint8_t tag_emulation_get_slot(void) {
-    return slotConfig.active_slot;
+    uint8_t count = tag_emulation_get_slot_count();
+    return (slotConfig.active_slot < count) ? slotConfig.active_slot : 0;
 }
 
 /**
  * Set the currently activated card slot index
  */
 void tag_emulation_set_slot(uint8_t index) {
+    if (index >= tag_emulation_get_slot_count()) {
+        return;
+    }
     slotConfig.active_slot = index;  // Re -set to the new switched card slot
+    tag_emulation_slot_mru_touch(index);
     rgb_marquee_reset();             // force animation color refresh according to new slot
 }
 
@@ -590,6 +938,9 @@ void tag_emulation_set_slot(uint8_t index) {
  * Switch to the card slot of the specified index, this function will automatically complete the data loading
  */
 void tag_emulation_change_slot(uint8_t index, bool sense_disable) {
+    if (index >= tag_emulation_get_slot_count()) {
+        return;
+    }
     if (sense_disable) {
         // Turn off the analog card to avoid triggering the emulation when switching the card slot
         tag_emulation_sense_end();
@@ -602,6 +953,108 @@ void tag_emulation_change_slot(uint8_t index, bool sense_disable) {
         // According to the configuration of the new card slot, the monitoring status of our update
         tag_emulation_sense_run();
     }
+}
+
+/**
+ * Switch slot while a reader field is still present. The NFCT/LF sense state is
+ * left untouched; only the active slot data is swapped and the 14A protocol
+ * state is reset for the next reader frame.
+ */
+bool tag_emulation_change_slot_live(uint8_t index) {
+    uint8_t count = tag_emulation_get_slot_count();
+    uint8_t current = tag_emulation_get_slot();
+    if (index >= count || index == current) {
+        return false;
+    }
+
+    tag_emulation_save_data();
+    tag_emulation_set_slot(index);
+    tag_emulation_load_data();
+
+    tag_slot_specific_type_t types;
+    tag_emulation_get_specific_types_by_slot(index, &types);
+    if (types.tag_hf != TAG_TYPE_UNDEFINED) {
+        nfc_tag_14a_slot_switched();
+    }
+    return true;
+}
+
+/**
+ * Append one slot at the end of the visible range.
+ * Flash space must be checked by the caller before calling this.
+ */
+bool tag_emulation_slot_add(tag_specific_type_t tag_type) {
+    uint8_t count = tag_emulation_get_slot_count();
+    if (count >= TAG_MAX_SLOT_NUM) {
+        return false;
+    }
+
+    uint8_t slot = count;
+    slotConfig.slots[slot].enabled_hf = false;
+    slotConfig.slots[slot].enabled_lf = false;
+    slotConfig.slots[slot].tag_hf = TAG_TYPE_UNDEFINED;
+    slotConfig.slots[slot].tag_lf = TAG_TYPE_UNDEFINED;
+    memset(&m_slot_meta[slot], 0, sizeof(m_slot_meta[slot]));
+
+    if (tag_type != TAG_TYPE_UNDEFINED) {
+        tag_sense_type_t sense = get_sense_type_from_tag_type(tag_type);
+        if (sense == TAG_SENSE_HF) {
+            slotConfig.slots[slot].tag_hf = tag_type;
+            slotConfig.slots[slot].enabled_hf = true;
+        } else if (sense == TAG_SENSE_LF) {
+            slotConfig.slots[slot].tag_lf = tag_type;
+            slotConfig.slots[slot].enabled_lf = true;
+        }
+    }
+
+    slotConfig.slot_count = count + 1;
+    tag_emulation_save_config();
+    return true;
+}
+
+/**
+ * Remove the last visible slot and delete its data and nickname records.
+ */
+bool tag_emulation_slot_remove_last(void) {
+    uint8_t count = tag_emulation_get_slot_count();
+    if (count <= TAG_SLOT_COUNT_MIN) {
+        return false;
+    }
+
+    uint8_t slot = count - 1;
+    if (slotConfig.active_slot == slot) {
+        tag_emulation_change_slot(slot - 1, true);
+    }
+
+    tag_emulation_delete_data(slot, TAG_SENSE_HF);
+    tag_emulation_delete_data(slot, TAG_SENSE_LF);
+
+    fds_slot_record_map_t map;
+    get_fds_map_by_slot_sense_type_for_nick(slot, TAG_SENSE_HF, &map);
+    fds_delete_sync(map.id, map.key);
+    get_fds_map_by_slot_sense_type_for_nick(slot, TAG_SENSE_LF, &map);
+    fds_delete_sync(map.id, map.key);
+
+    slotConfig.slots[slot].enabled_hf = false;
+    slotConfig.slots[slot].enabled_lf = false;
+    slotConfig.slots[slot].tag_hf = TAG_TYPE_UNDEFINED;
+    slotConfig.slots[slot].tag_lf = TAG_TYPE_UNDEFINED;
+
+    fds_delete_sync(FDS_SLOT_META_FILE_ID_BASE + slot, 1);
+    memset(&m_slot_meta[slot], 0, sizeof(m_slot_meta[slot]));
+
+    // Remove the slot from the MRU list.
+    uint8_t dst = 0;
+    for (uint8_t i = 0; i < m_mru_count; i++) {
+        if (m_mru[i] != slot) {
+            m_mru[dst++] = m_mru[i];
+        }
+    }
+    m_mru_count = dst;
+
+    slotConfig.slot_count = count - 1;
+    tag_emulation_save_config();
+    return true;
 }
 
 /**
@@ -634,12 +1087,16 @@ void tag_emulation_slot_set_enable(uint8_t slot, tag_sense_type_t sense_type, bo
  * Find the next valid card slot
  */
 uint8_t tag_emulation_slot_find_next(uint8_t slot_now) {
-    uint8_t start_slot = (slot_now + 1 == TAG_MAX_SLOT_NUM) ? 0 : slot_now + 1;
+    uint8_t count = tag_emulation_get_slot_count();
+    if (slot_now >= count) {
+        slot_now = 0;
+    }
+    uint8_t start_slot = (slot_now + 1 == count) ? 0 : slot_now + 1;
     for (uint8_t i = start_slot;;) {
         if (i == slot_now) return slot_now;                                              // No other activated card slots were found after a loop
         if (slotConfig.slots[i].enabled_hf || slotConfig.slots[i].enabled_lf) return i;  // Check whether the card slot that is currently traversed is enabled, so that the capacity determines that the current card slot is the card slot that can effectively enable capacity
         i++;
-        if (i == TAG_MAX_SLOT_NUM) {  // Continue the next cycle
+        if (i == count) {  // Continue the next cycle
             i = 0;
         }
     }
@@ -650,12 +1107,16 @@ uint8_t tag_emulation_slot_find_next(uint8_t slot_now) {
  * Find the previous valid card slot
  */
 uint8_t tag_emulation_slot_find_prev(uint8_t slot_now) {
-    uint8_t start_slot = (slot_now == 0) ? (TAG_MAX_SLOT_NUM - 1) : slot_now - 1;
+    uint8_t count = tag_emulation_get_slot_count();
+    if (slot_now >= count) {
+        slot_now = 0;
+    }
+    uint8_t start_slot = (slot_now == 0) ? (count - 1) : slot_now - 1;
     for (uint8_t i = start_slot;;) {
         if (i == slot_now) return slot_now;                                              // No other activated card slots were found after a loop
         if (slotConfig.slots[i].enabled_hf || slotConfig.slots[i].enabled_lf) return i;  // Check whether the card slot that is currently traversed is enabled, so that the capacity determines that the current card slot is the card slot that can effectively enable capacity
         if (i == 0) {                                                                    // Continue the next cycle
-            i = TAG_MAX_SLOT_NUM - 1;
+            i = count - 1;
         } else {
             i--;
         }

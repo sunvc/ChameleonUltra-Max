@@ -152,6 +152,8 @@ nfc_tag_mf1_auth_log_t *mf1_get_auth_log(uint32_t *count);
 void nfc_tag_mf1_reset_handler();
 int nfc_tag_mf1_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer);
 int nfc_tag_mf1_data_savecb(tag_specific_type_t type, tag_data_buffer_t *buffer);
+// Number of bytes that will be stored in FDS for this MF1 tag type.
+int nfc_tag_mf1_get_information_size(tag_specific_type_t type);
 bool nfc_tag_mf1_data_factory(uint8_t slot, tag_specific_type_t tag_type);
 void nfc_tag_mf1_set_detection_enable(bool enable);
 bool nfc_tag_mf1_is_detection_enable(void);

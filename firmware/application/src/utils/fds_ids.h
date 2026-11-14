@@ -20,17 +20,23 @@
 
 /*
  * Each card slot has two types of data, high and low frequency
- * FDS file ID follows the card slot, starting from 0x1100 to 0x1107
+ * FDS file ID follows the card slot, starting from 0x1100 to 0x11FE (255 slots)
  * FDS record key mirrors TAG_SENSE_LF/HF so is 1 for LF, 2 for HF (currently)
  */
 #define FDS_SLOT_TAG_DUMP_FILE_ID_BASE      0x1100
 
 /*
  * Each card slot has two types of data, high and low frequency, so it can get two names
- * FDS file ID follows the card slot, starting from 0x1200 to 0x1207
+ * FDS file ID follows the card slot, starting from 0x1200 to 0x12FE (255 slots)
  * FDS record key mirrors TAG_SENSE_LF/HF so is 1 for LF, 2 for HF (currently)
  */
 #define FDS_SLOT_TAG_NICK_NAME_FILE_ID_BASE 0x1200
+
+/*
+ * Compact per-slot metadata for smart polling (UID/ATQA/SAK/tag types).
+ * File ID follows the slot, 0x1300 + slot, record key 1.
+ */
+#define FDS_SLOT_META_FILE_ID_BASE          0x1300
 
 // Note that previously assigned records may need to be cleaned from Flash.
 // Taking into account the possible overlaps, it boils down to

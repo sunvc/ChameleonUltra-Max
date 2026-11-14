@@ -156,31 +156,252 @@ static data_frame_tx_t *cmd_processor_get_device_settings(uint16_t cmd, uint16_t
     memcpy(settings + 7, settings_get_ble_connect_key(), BLE_PAIRING_KEY_LEN);
     settings[13] = settings_get_sleep_timeout() / 1000U; // wake timeout in seconds, expected at index 13 by the GUI
     settings[14] = settings_get_slot_polling_enable(); // slot polling on/off (add on version8)
-    settings[15] = settings_get_slot_polling_interval(); // polling interval in 100 ms units
-    settings[16] = settings_get_slot_polling_slot_mask(); // polling slot mask
+    settings[15] = settings_get_slot_polling_interval(); // polling interval in 10 ms units
+    settings[16] = settings_get_slot_polling_slot_mask_byte(0); // low 8 slots; full bitmap via GET_SLOT_POLLING_CONFIG
     settings[17] = settings_get_slot_group_size(); // card group size (0/2/4/8)
     return data_frame_make(cmd, STATUS_SUCCESS, 12 + BLE_PAIRING_KEY_LEN, settings);
 }
 
 static data_frame_tx_t *cmd_processor_get_slot_polling_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    uint8_t payload[4] = {
-        settings_get_slot_polling_enable() ? 1 : 0,
-        settings_get_slot_polling_interval(),
-        settings_get_slot_polling_slot_mask(),
-        settings_get_slot_group_size(),
-    };
-    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), payload);
+    uint8_t count = tag_emulation_get_slot_count();
+    uint8_t payload[TAG_MAX_SLOT_NUM];
+    for (uint8_t slot = 0; slot < count; slot++) {
+        payload[slot] = settings_get_slot_polling_slot_mask_bit(slot) ? 1 : 0;
+    }
+    return data_frame_make(cmd, STATUS_SUCCESS, count, payload);
 }
 
 static data_frame_tx_t *cmd_processor_set_slot_polling_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    if (length != 4 || data[0] > 1) {
+    if (length == 4 && data[0] <= 1) {
+        // Legacy version 8 layout: {enable, interval (10 ms units), 8-bit mask, group size}.
+        settings_set_slot_polling_enable(data[0] != 0);
+        settings_set_slot_polling_interval(data[1]);
+        settings_set_slot_polling_slot_mask_byte(0, data[2]);
+        settings_set_slot_group_size(data[3]);
+        return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+    }
+    if (length >= 1 && length <= TAG_MAX_SLOT_NUM) {
+        // One byte per slot, starting at slot 0.
+        for (uint16_t slot = 0; slot < length; slot++) {
+            settings_set_slot_polling_slot_mask_bit((uint8_t)slot, data[slot] != 0);
+        }
+        // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+    }
+    return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_device_auto_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    uint8_t payload = settings_get_slot_polling_enable() ? 1 : 0;
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), &payload);
+}
+
+static data_frame_tx_t *cmd_processor_set_device_auto_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != 1 || data[0] > 1) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     settings_set_slot_polling_enable(data[0] != 0);
-    settings_set_slot_polling_interval(data[1]);
-    settings_set_slot_polling_slot_mask(data[2]);
-    settings_set_slot_group_size(data[3]);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_device_auto_polling_delay(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    uint16_t delay_ms = (uint16_t)settings_get_slot_polling_interval() * 10U;
+    uint16_t payload = U16HTONS(delay_ms);
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), (uint8_t *)&payload);
+}
+
+static data_frame_tx_t *cmd_processor_set_device_auto_polling_delay(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != 2) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    uint16_t delay_ms = ((uint16_t)data[0] << 8) | data[1];
+    uint8_t interval = (uint8_t)((delay_ms + 5U) / 10U);
+    if (interval < SETTINGS_SLOT_POLLING_INTERVAL_MIN) {
+        interval = SETTINGS_SLOT_POLLING_INTERVAL_MIN;
+    }
+    settings_set_slot_polling_interval(interval);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_smart_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    uint8_t payload = settings_get_smart_polling_enable() ? 1 : 0;
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), &payload);
+}
+
+static data_frame_tx_t *cmd_processor_set_smart_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != 1 || data[0] > 1) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    settings_set_smart_polling_enable(data[0] != 0);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_ic_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    uint8_t payload = settings_get_ic_polling_enable() ? 1 : 0;
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), &payload);
+}
+
+static data_frame_tx_t *cmd_processor_set_ic_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != 1 || data[0] > 1) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    settings_set_ic_polling_enable(data[0] != 0);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_id_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    uint8_t payload = settings_get_id_polling_enable() ? 1 : 0;
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), &payload);
+}
+
+static data_frame_tx_t *cmd_processor_set_id_polling(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != 1 || data[0] > 1) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    settings_set_id_polling_enable(data[0] != 0);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static uint16_t slot_record_bytes(tag_specific_type_t tag_type) {
+    switch (tag_type) {
+        case TAG_TYPE_MIFARE_Mini:
+        case TAG_TYPE_MIFARE_1024:
+        case TAG_TYPE_MIFARE_2048:
+        case TAG_TYPE_MIFARE_4096:
+            return (uint16_t)nfc_tag_mf1_get_information_size(tag_type);
+        case TAG_TYPE_NTAG_210:
+        case TAG_TYPE_NTAG_212:
+        case TAG_TYPE_NTAG_213:
+        case TAG_TYPE_NTAG_215:
+        case TAG_TYPE_NTAG_216:
+        case TAG_TYPE_MF0ICU1:
+        case TAG_TYPE_MF0ICU2:
+        case TAG_TYPE_MF0UL11:
+        case TAG_TYPE_MF0UL21:
+            return 1024;
+        case TAG_TYPE_HF14A_4:
+        case TAG_TYPE_SEOS:
+            return 4500;
+        default:
+            break;
+    }
+
+    tag_sense_type_t sense = get_sense_type_from_tag_type(tag_type);
+    if (sense == TAG_SENSE_LF) {
+        return 20;
+    }
+    if (sense == TAG_SENSE_HF) {
+        return 4500;
+    }
+    return 0;
+}
+
+/**
+ * Reserve space for one slot: the card record, one LF record, two nickname
+ * records and the extra slot-config entry. One virtual page is kept free for
+ * FDS garbage collection.
+ */
+static bool slot_flash_space_available(tag_specific_type_t tag_type) {
+    uint16_t record_bytes = slot_record_bytes(tag_type);
+    if (record_bytes == 0) {
+        // Empty slot: reserve the common M1 1K size so a later write is likely to fit.
+        record_bytes = (uint16_t)nfc_tag_mf1_get_information_size(TAG_TYPE_MIFARE_1024);
+    }
+
+    uint32_t hf_words = (record_bytes + 3U) / 4U + 3U; // + 3 words FDS record header
+    uint32_t lf_words = (20U + 3U) / 4U + 3U;
+    uint32_t nick_words = 2U * (((36U + 3U) / 4U) + 3U);
+    uint32_t required = hf_words + lf_words + nick_words + 2U; // 2 words: one more 8-byte config entry
+
+    // Slots that have no type yet will most likely receive an M1 1K card.
+    // Reserve that much for each of them so repeated "add" cannot overcommit.
+    uint16_t m1k_bytes = (uint16_t)nfc_tag_mf1_get_information_size(TAG_TYPE_MIFARE_1024);
+    uint32_t m1k_hf_words = (m1k_bytes + 3U) / 4U + 3U;
+    uint8_t slot_count = tag_emulation_get_slot_count();
+    for (uint8_t s = 0; s < slot_count; s++) {
+        tag_slot_specific_type_t types;
+        tag_emulation_get_specific_types_by_slot(s, &types);
+        if (types.tag_hf == TAG_TYPE_UNDEFINED && types.tag_lf == TAG_TYPE_UNDEFINED) {
+            required += m1k_hf_words + nick_words + 2U;
+        }
+    }
+
+    uint32_t config_words = (TAG_SLOT_CONFIG_CURRENT_SIZE + 3U) / 4U + 3U;
+    uint32_t capacity = (uint32_t)FDS_VIRTUAL_PAGES * FDS_VIRTUAL_PAGE_SIZE;
+    uint32_t margin = FDS_VIRTUAL_PAGE_SIZE; // keep one virtual page free for GC
+    fds_stat_t stat;
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (fds_stat(&stat) != NRF_SUCCESS) {
+            return false;
+        }
+        uint32_t free_total = capacity - stat.words_used + stat.freeable_words;
+        if (free_total >= required + margin &&
+                stat.largest_contig >= hf_words &&
+                stat.largest_contig >= config_words) {
+            return true;
+        }
+        if (attempt == 0) {
+            fds_gc_sync();
+        }
+    }
+    return false;
+}
+
+static data_frame_tx_t *cmd_processor_slot_add(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    tag_specific_type_t tag_type = TAG_TYPE_UNDEFINED;
+    if (length == 2) {
+        uint16_t raw_type = ((uint16_t)data[0] << 8) | data[1];
+        tag_type = (tag_specific_type_t)raw_type;
+        if (tag_type != TAG_TYPE_UNDEFINED && !is_tag_specific_type_valid(tag_type)) {
+            return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+        }
+    } else if (length != 0) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+
+    if (tag_emulation_get_slot_count() >= TAG_MAX_SLOT_NUM) {
+        return data_frame_make(cmd, STATUS_CMD_ERR, 0, NULL);
+    }
+    if (!slot_flash_space_available(tag_type)) {
+        return data_frame_make(cmd, STATUS_FLASH_WRITE_FAIL, 0, NULL);
+    }
+
+    uint8_t new_slot = tag_emulation_get_slot_count();
+    if (!tag_emulation_slot_add(tag_type)) {
+        return data_frame_make(cmd, STATUS_FLASH_WRITE_FAIL, 0, NULL);
+    }
+    settings_set_slot_polling_slot_mask_bit(new_slot, true);
+    settings_save_config();
+
+    uint8_t count = tag_emulation_get_slot_count();
+    return data_frame_make(cmd, STATUS_SUCCESS, 1, &count);
+}
+
+static data_frame_tx_t *cmd_processor_slot_remove(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != 0) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    if (tag_emulation_get_slot_count() <= TAG_SLOT_COUNT_MIN) {
+        return data_frame_make(cmd, STATUS_CMD_ERR, 0, NULL);
+    }
+    if (!tag_emulation_slot_remove_last()) {
+        return data_frame_make(cmd, STATUS_FLASH_WRITE_FAIL, 0, NULL);
+    }
+
+    uint8_t count = tag_emulation_get_slot_count();
+    return data_frame_make(cmd, STATUS_SUCCESS, 1, &count);
 }
 
 static data_frame_tx_t *cmd_processor_reset_device(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -225,6 +446,8 @@ static data_frame_tx_t *cmd_processor_set_animation_mode(uint16_t cmd, uint16_t 
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     settings_set_animation_config(data[0]);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -270,6 +493,8 @@ static data_frame_tx_t *cmd_processor_set_button_press_config(uint16_t cmd, uint
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     settings_set_button_press_config(data[0], data[1]);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -286,6 +511,48 @@ static data_frame_tx_t *cmd_processor_set_long_button_press_config(uint16_t cmd,
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     settings_set_long_button_press_config(data[0], data[1]);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_extra_long_button_press_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if ((length != 1) || (!is_settings_button_type_valid(data[0]))) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    uint8_t config = settings_get_extra_long_button_press_config(data[0]);
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(config), &config);
+}
+
+static data_frame_tx_t *cmd_processor_set_extra_long_button_press_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if ((length != 2) || (!is_settings_button_type_valid(data[0]))) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    settings_set_extra_long_button_press_config(data[0], data[1]);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_extra_long_press_threshold(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    (void)status;
+    (void)length;
+    (void)data;
+    uint16_t duration = settings_get_extra_long_press_threshold();
+    uint8_t resp_data[2];
+    resp_data[0] = (uint8_t)(duration >> 8);
+    resp_data[1] = (uint8_t)(duration & 0xFF);
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(resp_data), resp_data);
+}
+
+static data_frame_tx_t *cmd_processor_set_extra_long_press_threshold(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    if (length != 2) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+    uint16_t duration = ((uint16_t)data[0] << 8) | data[1];
+    settings_set_extra_long_press_threshold(duration);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -299,6 +566,8 @@ static data_frame_tx_t *cmd_processor_set_sleep_timeout(uint16_t cmd, uint16_t s
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     settings_set_sleep_timeout(data[0]);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -312,6 +581,8 @@ static data_frame_tx_t *cmd_processor_set_ble_pairing_enable(uint16_t cmd, uint1
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     settings_set_ble_pairing_enable(data[0]);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -1186,7 +1457,7 @@ static data_frame_tx_t *cmd_processor_generic_read(uint16_t cmd, uint16_t status
 
 
 static data_frame_tx_t *cmd_processor_set_active_slot(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    if (length != 1 || data[0] >= TAG_MAX_SLOT_NUM) {
+    if (length != 1 || data[0] >= tag_emulation_get_slot_count()) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     change_slot_auto(data[0]);
@@ -1204,10 +1475,11 @@ static data_frame_tx_t *cmd_processor_set_slot_tag_type(uint16_t cmd, uint16_t s
 
     payload_t *payload = (payload_t *)data;
     tag_specific_type_t tag_type = U16NTOHS(payload->tag_type);
-    if (payload->num_slot >= TAG_MAX_SLOT_NUM || !is_tag_specific_type_valid(tag_type)) {
+    if (payload->num_slot >= tag_emulation_get_slot_count() || !is_tag_specific_type_valid(tag_type)) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     tag_emulation_change_type(payload->num_slot, tag_type);
+    tag_emulation_slot_meta_update(payload->num_slot);
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -1218,12 +1490,13 @@ static data_frame_tx_t *cmd_processor_delete_slot_sense_type(uint16_t cmd, uint1
     } PACKED payload_t;
     payload_t *payload = (payload_t *)data;
     if ((length != sizeof(payload_t)) ||
-            (payload->num_slot >= TAG_MAX_SLOT_NUM) ||
+            (payload->num_slot >= tag_emulation_get_slot_count()) ||
             (payload->sense_type != TAG_SENSE_HF && payload->sense_type != TAG_SENSE_LF)) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
 
     tag_emulation_delete_data(payload->num_slot, payload->sense_type);
+    tag_emulation_slot_meta_update(payload->num_slot);
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -1238,10 +1511,11 @@ static data_frame_tx_t *cmd_processor_set_slot_data_default(uint16_t cmd, uint16
 
     payload_t *payload = (payload_t *)data;
     tag_specific_type_t tag_type = U16NTOHS(payload->tag_type);
-    if (payload->num_slot >= TAG_MAX_SLOT_NUM || !is_tag_specific_type_valid(tag_type)) {
+    if (payload->num_slot >= tag_emulation_get_slot_count() || !is_tag_specific_type_valid(tag_type)) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     status = tag_emulation_factory_data(payload->num_slot, tag_type) ? STATUS_SUCCESS : STATUS_NOT_IMPLEMENTED;
+    tag_emulation_slot_meta_update(payload->num_slot);
     return data_frame_make(cmd, status, 0, NULL);
 }
 
@@ -1254,7 +1528,7 @@ static data_frame_tx_t *cmd_processor_set_slot_enable(uint16_t cmd, uint16_t sta
 
     payload_t *payload = (payload_t *)data;
     if (length != sizeof(payload_t) ||
-            payload->slot_index >= TAG_MAX_SLOT_NUM ||
+            payload->slot_index >= tag_emulation_get_slot_count() ||
             (payload->sense_type != TAG_SENSE_HF && payload->sense_type != TAG_SENSE_LF) ||
             payload->enabled > 1) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
@@ -1290,16 +1564,17 @@ static data_frame_tx_t *cmd_processor_get_slot_info(uint16_t cmd, uint16_t statu
     struct {
         uint16_t hf_tag_type;
         uint16_t lf_tag_type;
-    } PACKED payload[8];
+    } PACKED payload[TAG_MAX_SLOT_NUM];
 
+    uint8_t count = tag_emulation_get_slot_count();
     tag_slot_specific_type_t tag_types;
-    for (uint8_t slot = 0; slot < 8; slot++) {
+    for (uint8_t slot = 0; slot < count; slot++) {
         tag_emulation_get_specific_types_by_slot(slot, &tag_types);
         payload[slot].hf_tag_type = U16HTONS(tag_types.tag_hf);
         payload[slot].lf_tag_type = U16HTONS(tag_types.tag_lf);
     }
 
-    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), (uint8_t *)&payload);
+    return data_frame_make(cmd, STATUS_SUCCESS, count * sizeof(payload[0]), (uint8_t *)&payload);
 }
 
 static data_frame_tx_t *cmd_processor_wipe_fds(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -1895,6 +2170,7 @@ static data_frame_tx_t *cmd_processor_hf14a_set_anti_coll_data(uint16_t cmd, uin
     offset ++;
     memcpy(info->ats->data, &data[offset], info->ats->length);
     offset += info->ats->length;
+    tag_emulation_slot_meta_update(tag_emulation_get_slot());
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -1905,7 +2181,7 @@ static data_frame_tx_t *cmd_processor_set_slot_tag_nick(uint16_t cmd, uint16_t s
     uint8_t slot = data[0];
     uint8_t sense_type = data[1];
     fds_slot_record_map_t map_info;
-    if (slot >= TAG_MAX_SLOT_NUM || (sense_type != TAG_SENSE_HF && sense_type != TAG_SENSE_LF)) {
+    if (slot >= tag_emulation_get_slot_count() || (sense_type != TAG_SENSE_HF && sense_type != TAG_SENSE_LF)) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     get_fds_map_by_slot_sense_type_for_nick(slot, sense_type, &map_info);
@@ -1930,7 +2206,7 @@ static data_frame_tx_t *cmd_processor_get_slot_tag_nick(uint16_t cmd, uint16_t s
     uint8_t buffer[36];
     fds_slot_record_map_t map_info;
 
-    if (slot >= TAG_MAX_SLOT_NUM || (sense_type != TAG_SENSE_HF && sense_type != TAG_SENSE_LF)) {
+    if (slot >= tag_emulation_get_slot_count() || (sense_type != TAG_SENSE_HF && sense_type != TAG_SENSE_LF)) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     get_fds_map_by_slot_sense_type_for_nick(slot, sense_type, &map_info);
@@ -1942,11 +2218,33 @@ static data_frame_tx_t *cmd_processor_get_slot_tag_nick(uint16_t cmd, uint16_t s
     return data_frame_make(cmd, STATUS_SUCCESS, buffer[0], &buffer[1]);
 }
 
+#define SLOT_NICKS_PAGE_MAX 32
+
 static data_frame_tx_t *cmd_processor_get_all_slot_nicks(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    uint8_t response_buffer[TAG_MAX_SLOT_NUM * 2 * 37]; // Max possible size: 8 slots * 2 sense types * (1 byte length + 36 bytes nick)
+    // One page fits comfortably in a 4096-byte frame:
+    // 32 slots * 2 sense types * (1 byte length + 36 bytes nick) = 2368 bytes.
+    static uint8_t response_buffer[SLOT_NICKS_PAGE_MAX * 2 * 37];
     uint16_t response_length = 0;
 
-    for (uint8_t slot = 0; slot < TAG_MAX_SLOT_NUM; slot++) {
+    uint8_t slot_count = tag_emulation_get_slot_count();
+    uint8_t start = 0;
+    uint8_t page = (slot_count < SLOT_NICKS_PAGE_MAX) ? slot_count : SLOT_NICKS_PAGE_MAX;
+
+    if (length == 2) {
+        start = data[0];
+        page = data[1];
+        if (page == 0 || page > SLOT_NICKS_PAGE_MAX || start >= slot_count) {
+            return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+        }
+        if (page > slot_count - start) {
+            page = slot_count - start;
+        }
+    } else if (length != 0) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+
+    for (uint16_t i = 0; i < page; i++) {
+        uint8_t slot = start + i;
         uint8_t hf_buffer[36];
         fds_slot_record_map_t hf_map_info;
         get_fds_map_by_slot_sense_type_for_nick(slot, TAG_SENSE_HF, &hf_map_info);
@@ -1955,8 +2253,8 @@ static data_frame_tx_t *cmd_processor_get_all_slot_nicks(uint16_t cmd, uint16_t 
 
         if (hf_ret && hf_buffer_length > 0) {
             response_buffer[response_length++] = hf_buffer[0];
-            for (uint8_t i = 1; i <= hf_buffer[0] && i < hf_buffer_length; i++) {
-                response_buffer[response_length++] = hf_buffer[i];
+            for (uint8_t j = 1; j <= hf_buffer[0] && j < hf_buffer_length; j++) {
+                response_buffer[response_length++] = hf_buffer[j];
             }
         } else {
             response_buffer[response_length++] = 0;
@@ -1970,8 +2268,8 @@ static data_frame_tx_t *cmd_processor_get_all_slot_nicks(uint16_t cmd, uint16_t 
 
         if (lf_ret && lf_buffer_length > 0) {
             response_buffer[response_length++] = lf_buffer[0];
-            for (uint8_t i = 1; i <= lf_buffer[0] && i < lf_buffer_length; i++) {
-                response_buffer[response_length++] = lf_buffer[i];
+            for (uint8_t j = 1; j <= lf_buffer[0] && j < lf_buffer_length; j++) {
+                response_buffer[response_length++] = lf_buffer[j];
             }
         } else {
             response_buffer[response_length++] = 0;
@@ -1989,7 +2287,7 @@ static data_frame_tx_t *cmd_processor_delete_slot_tag_nick(uint16_t cmd, uint16_
     uint8_t sense_type = data[1];
     fds_slot_record_map_t map_info;
 
-    if (slot >= TAG_MAX_SLOT_NUM || (sense_type != TAG_SENSE_HF && sense_type != TAG_SENSE_LF)) {
+    if (slot >= tag_emulation_get_slot_count() || (sense_type != TAG_SENSE_HF && sense_type != TAG_SENSE_LF)) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     get_fds_map_by_slot_sense_type_for_nick(slot, sense_type, &map_info);
@@ -2092,12 +2390,13 @@ static data_frame_tx_t *cmd_processor_get_enabled_slots(uint16_t cmd, uint16_t s
     struct {
         uint8_t enabled_hf;
         uint8_t enabled_lf;
-    } PACKED payload[8];
-    for (uint8_t slot = 0; slot < 8; slot++) {
+    } PACKED payload[TAG_MAX_SLOT_NUM];
+    uint8_t count = tag_emulation_get_slot_count();
+    for (uint8_t slot = 0; slot < count; slot++) {
         payload[slot].enabled_hf = is_slot_enabled(slot, TAG_SENSE_HF);
         payload[slot].enabled_lf = is_slot_enabled(slot, TAG_SENSE_LF);
     }
-    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), (uint8_t *)&payload);
+    return data_frame_make(cmd, STATUS_SUCCESS, count * sizeof(payload[0]), (uint8_t *)&payload);
 }
 
 static data_frame_tx_t *cmd_processor_get_ble_connect_key(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -2121,6 +2420,8 @@ static data_frame_tx_t *cmd_processor_set_ble_connect_key(uint16_t cmd, uint16_t
     }
     // Key is valid, we can update to config
     settings_set_ble_connect_key(data);
+    // Persist to flash immediately so a power cycle keeps this setting.
+    settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -2692,6 +2993,7 @@ static data_frame_tx_t *cmd_processor_hf14a_4_set_anti_coll(uint16_t cmd, uint16
     info->ats->length = data[offset];
     offset++;
     memcpy(info->ats->data, &data[offset], info->ats->length);
+    tag_emulation_slot_meta_update(tag_emulation_get_slot());
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
@@ -3314,6 +3616,18 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_GET_BATTERY_INFO_EX,          NULL,                        cmd_processor_get_battery_info_ex,           NULL                   },
     {    DATA_CMD_GET_SLOT_POLLING_CONFIG,      NULL,                        cmd_processor_get_slot_polling_config,       NULL                   },
     {    DATA_CMD_SET_SLOT_POLLING_CONFIG,      NULL,                        cmd_processor_set_slot_polling_config,       NULL                   },
+    {    DATA_CMD_SLOT_ADD,                     NULL,                        cmd_processor_slot_add,                      NULL                   },
+    {    DATA_CMD_SLOT_REMOVE,                  NULL,                        cmd_processor_slot_remove,                   NULL                   },
+    {    DATA_CMD_GET_DEVICE_AUTO_POLLING,      NULL,                        cmd_processor_get_device_auto_polling,       NULL                   },
+    {    DATA_CMD_SET_DEVICE_AUTO_POLLING,      NULL,                        cmd_processor_set_device_auto_polling,       NULL                   },
+    {    DATA_CMD_GET_DEVICE_AUTO_POLLING_DELAY, NULL,                       cmd_processor_get_device_auto_polling_delay, NULL                   },
+    {    DATA_CMD_SET_DEVICE_AUTO_POLLING_DELAY, NULL,                       cmd_processor_set_device_auto_polling_delay, NULL                   },
+    {    DATA_CMD_GET_SMART_POLLING_ENABLE,     NULL,                        cmd_processor_get_smart_polling,             NULL                   },
+    {    DATA_CMD_SET_SMART_POLLING_ENABLE,     NULL,                        cmd_processor_set_smart_polling,             NULL                   },
+    {    DATA_CMD_GET_IC_POLLING_ENABLE,        NULL,                        cmd_processor_get_ic_polling,                NULL                   },
+    {    DATA_CMD_SET_IC_POLLING_ENABLE,        NULL,                        cmd_processor_set_ic_polling,                NULL                   },
+    {    DATA_CMD_GET_ID_POLLING_ENABLE,        NULL,                        cmd_processor_get_id_polling,                NULL                   },
+    {    DATA_CMD_SET_ID_POLLING_ENABLE,        NULL,                        cmd_processor_set_id_polling,                NULL                   },
     {    DATA_CMD_RESET_DEVICE,                 NULL,                        cmd_processor_reset_device,                  NULL                   },
     {    DATA_CMD_GET_BUTTON_PRESS_CONFIG,      NULL,                        cmd_processor_get_button_press_config,       NULL                   },
     {    DATA_CMD_SET_BUTTON_PRESS_CONFIG,      NULL,                        cmd_processor_set_button_press_config,       NULL                   },
@@ -3332,6 +3646,10 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_GET_ALL_SLOT_NICKS,           NULL,                        cmd_processor_get_all_slot_nicks,            NULL                   },
     {    DATA_CMD_GET_LONG_PRESS_THRESHOLD,     NULL,                        cmd_processor_get_long_press_threshold,      NULL                   },
     {    DATA_CMD_SET_LONG_PRESS_THRESHOLD,     NULL,                        cmd_processor_set_long_press_threshold,      NULL                   },
+    {    DATA_CMD_GET_EXTRA_LONG_BUTTON_PRESS_CONFIG, NULL,                  cmd_processor_get_extra_long_button_press_config, NULL             },
+    {    DATA_CMD_SET_EXTRA_LONG_BUTTON_PRESS_CONFIG, NULL,                  cmd_processor_set_extra_long_button_press_config, NULL             },
+    {    DATA_CMD_GET_EXTRA_LONG_PRESS_THRESHOLD, NULL,                      cmd_processor_get_extra_long_press_threshold, NULL                 },
+    {    DATA_CMD_SET_EXTRA_LONG_PRESS_THRESHOLD, NULL,                      cmd_processor_set_extra_long_press_threshold, NULL                 },
 
 #if defined(PROJECT_CHAMELEON_ULTRA)
 
@@ -3398,6 +3716,7 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_HF14A_SET_ANTI_COLL_DATA,     NULL,                        cmd_processor_hf14a_set_anti_coll_data,      NULL                   },
 
     {    DATA_CMD_MF1_WRITE_EMU_BLOCK_DATA,     NULL,                        cmd_processor_mf1_write_emu_block_data,      NULL                   },
+    {    DATA_CMD_MF1_WRITE_EMU_BLOCK_DATA_32SLOT, NULL,                     cmd_processor_mf1_write_emu_block_data,      NULL                   },
     {    DATA_CMD_MF1_SET_DETECTION_ENABLE,     NULL,                        cmd_processor_mf1_set_detection_enable,      NULL                   },
     {    DATA_CMD_MF1_GET_DETECTION_COUNT,      NULL,                        cmd_processor_mf1_get_detection_count,       NULL                   },
     {    DATA_CMD_MF1_GET_DETECTION_LOG,        NULL,                        cmd_processor_mf1_get_detection_log,         NULL                   },

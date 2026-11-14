@@ -9,8 +9,10 @@
 #include "tag_base_type.h"
 #include "utils.h"
 
-// Up to eight card slots
-#define TAG_MAX_SLOT_NUM 8
+// Maximum number of slot entries the storage can hold.
+// The visible slot count is dynamic (8..TAG_MAX_SLOT_NUM) and is stored in slotConfig.
+#define TAG_MAX_SLOT_NUM 255
+#define TAG_SLOT_COUNT_MIN 8
 
 extern bool g_is_tag_emulating;
 
@@ -45,14 +47,15 @@ typedef struct {
  * This configuration can be preserved by persistently to Flash
  * 4 bytes a word, keep in mind the entire word alignment
  */
-#define TAG_SLOT_CONFIG_CURRENT_VERSION 8
+#define TAG_SLOT_CONFIG_CURRENT_VERSION 10
 // Intended struct size, for static assert
-#define TAG_SLOT_CONFIG_CURRENT_SIZE 68
+#define TAG_SLOT_CONFIG_CURRENT_SIZE (4 + 8 * TAG_MAX_SLOT_NUM)
 
 typedef struct {
     // Basic configuration
     uint8_t version;      // struct version (U8 so map on old .activated<=7 field)
     uint8_t active_slot;  // Which slot is currently active
+    uint8_t slot_count;   // Visible slot count, TAG_SLOT_COUNT_MIN..TAG_MAX_SLOT_NUM
     uint32_t : 0;         // U32 align
     struct {              // 4-byte slot config + 2*2-byte tag_specific_types
         // Individual slot configuration
@@ -73,6 +76,19 @@ typedef struct {
 
 // Use the macro to check the struct size
 STATIC_ASSERT(sizeof(tag_slot_config_t) == TAG_SLOT_CONFIG_CURRENT_SIZE);
+
+// Compact per-slot metadata used for UID lookup and MRU/event polling.
+#define TAG_SLOT_MRU_MAX 16
+typedef struct {
+    uint8_t valid;
+    uint8_t uid_len;
+    uint8_t uid[10];
+    uint8_t atqa[2];
+    uint8_t sak;
+    uint8_t last_auth_sector;
+    uint16_t tag_type_hf;
+    uint16_t tag_type_lf;
+} PACKED tag_slot_meta_t;
 
 // The most basic emulation card initialization program
 void tag_emulation_init(void);
@@ -102,8 +118,29 @@ tag_data_buffer_t *get_buffer_by_tag_type(tag_specific_type_t type);
 void tag_emulation_set_slot(uint8_t index);
 // Get the card slot currently used
 uint8_t tag_emulation_get_slot(void);
+// Get the visible slot count (TAG_SLOT_COUNT_MIN..TAG_MAX_SLOT_NUM)
+uint8_t tag_emulation_get_slot_count(void);
+// Append one slot. Does not check flash space; the command layer does.
+bool tag_emulation_slot_add(tag_specific_type_t tag_type);
+// Remove the last slot and delete its data/nick records.
+bool tag_emulation_slot_remove_last(void);
+
+// Slot metadata (UID/ATQA/SAK, tag types, last auth sector) for smart polling.
+void tag_emulation_slot_meta_init(void);
+void tag_emulation_slot_meta_update(uint8_t slot);
+uint8_t tag_emulation_find_slot_by_uid(const uint8_t *uid, uint8_t uid_len);
+void tag_emulation_slot_note_auth(uint8_t slot, uint8_t block);
+void tag_emulation_slot_mru_touch(uint8_t slot);
+// Next candidate: MRU list first, with a periodic full-sweep fallback.
+uint8_t tag_emulation_slot_next_smart(uint8_t current, uint8_t *sweep_cursor);
+// Pure round-robin over pollable slots (background sweep, ignores MRU).
+uint8_t tag_emulation_slot_next_sweep(uint8_t current, uint8_t *sweep_cursor);
+bool tag_emulation_slot_has_data(uint8_t slot);
 // Switch the card slot to control whether the passing parameter control is closed during the switching period to listen to
 void tag_emulation_change_slot(uint8_t index, bool sense_disable);
+// Switch slot while a reader field is still present: load the new data without
+// stopping/restarting NFC sense.
+bool tag_emulation_change_slot_live(uint8_t index);
 // Get the card slot to enable the state
 bool is_slot_enabled(uint8_t slot, tag_sense_type_t sense_type);
 // Set the card slot to enable

@@ -5,23 +5,28 @@
 
 #include "utils.h"
 
-#define SETTINGS_CURRENT_VERSION 8
+#define SETTINGS_CURRENT_VERSION 13
 #define SETTINGS_SLEEP_TIMEOUT_DEFAULT_S 8   // default wake timeout in seconds (matches SLEEP_DELAY_MS_BUTTON_WAKEUP)
 #define SETTINGS_SLEEP_TIMEOUT_MIN_S      5
 #define SETTINGS_SLEEP_TIMEOUT_MAX_S      60
 #define SETTINGS_LONG_PRESS_THRESHOLD_DEFAULT_MS 1000
 #define SETTINGS_LONG_PRESS_THRESHOLD_MIN_MS     200
+#define SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_DEFAULT_MS 3000
+#define SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MIN_MS     1500
+#define SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MAX_MS     10000
 #define BLE_PAIRING_KEY_LEN 6
 #define DEFAULT_BLE_PAIRING_KEY "123456"  // length must == 6
 
 // Slot auto-polling settings (add on version8)
-// interval is in 100 ms units, e.g. 5 -> 500 ms between slot switches
-#define SETTINGS_SLOT_POLLING_INTERVAL_DEFAULT   5
+// interval is in 10 ms units, e.g. 50 -> 500 ms between slot switches
+#define SETTINGS_SLOT_POLLING_INTERVAL_DEFAULT   50
 #define SETTINGS_SLOT_POLLING_INTERVAL_MIN       1
 #define SETTINGS_SLOT_POLLING_INTERVAL_MAX       100
-#define SETTINGS_SLOT_POLLING_SLOT_MASK_DEFAULT  0xFF // poll all 8 slots
+#define SETTINGS_SLOT_POLLING_SLOT_MASK_DEFAULT  0xFF // each byte covers 8 slots
 // slot group size: 0 or 8 = groups disabled, valid values: 0, 2, 4, 8
 #define SETTINGS_SLOT_GROUP_SIZE_DEFAULT         0
+// Smart polling: UID/MRU first, reader-event fast switch, background sweep fallback
+#define SETTINGS_SMART_POLLING_DEFAULT           1
 
 typedef enum {
     SettingsAnimationModeFull = 0U,
@@ -79,11 +84,19 @@ typedef struct ALIGN_U32 {
     // 2 bytes (add on version7)
     uint16_t long_press_threshold; // long button press threshold in ms
 
-    // 4 bytes (add on version8) slot auto-polling / card group configuration
+    // 35 bytes (add on version10; version8/9 used a 1/4-byte mask here) slot auto-polling / card group configuration
     uint8_t slot_polling_enable;        // 0 = off, 1 = auto switch slots periodically
-    uint8_t slot_polling_interval;      // interval in 100 ms units between slot switches
-    uint8_t slot_polling_slot_mask;     // bit per slot (bit0..7), only masked slots are polled
+    uint8_t slot_polling_interval;      // interval in 10 ms units between slot switches
+    uint8_t slot_polling_slot_mask[32]; // 256-bit mask, slot N is mask[N / 8] bit (N % 8)
     uint8_t slot_group_size;            // 0 or 8 = groups disabled, else 2 or 4 slots per group
+    uint8_t smart_polling_enable;       // UID/MRU fast polling and reader-event switching
+    uint8_t ic_polling_enable;          // include HF/IC slots in polling
+    uint8_t id_polling_enable;          // include LF/ID slots in polling
+
+    // Added at the end so older settings keep their field offsets (version 13).
+    uint8_t button_a_extra_long_press : 4;
+    uint8_t button_b_extra_long_press : 4;
+    uint16_t extra_long_press_threshold; // extra-long press threshold in ms
 
     /*
      * Warning !!!!!!!!!!!!!!!!!!!!!! <-------------
@@ -115,14 +128,29 @@ void settings_init_sleep_timeout_config(void);
 uint16_t settings_get_long_press_threshold(void);
 void settings_set_long_press_threshold(uint16_t duration);
 void settings_init_long_press_threshold_config(void);
+uint8_t settings_get_extra_long_button_press_config(char which);
+void settings_set_extra_long_button_press_config(char which, uint8_t value);
+uint16_t settings_get_extra_long_press_threshold(void);
+void settings_set_extra_long_press_threshold(uint16_t duration);
+void settings_init_extra_long_press_config(void);
 // slot auto-polling / card group settings (add on version8)
 void settings_init_slot_polling_config(void);
 bool settings_get_slot_polling_enable(void);
 void settings_set_slot_polling_enable(bool enable);
 uint8_t settings_get_slot_polling_interval(void);
 void settings_set_slot_polling_interval(uint8_t interval);
-uint8_t settings_get_slot_polling_slot_mask(void);
-void settings_set_slot_polling_slot_mask(uint8_t mask);
+const uint8_t *settings_get_slot_polling_slot_mask(void);
+bool settings_get_slot_polling_slot_mask_bit(uint8_t slot);
+void settings_set_slot_polling_slot_mask_bit(uint8_t slot, bool enable);
+uint8_t settings_get_slot_polling_slot_mask_byte(uint8_t index);
+void settings_set_slot_polling_slot_mask_byte(uint8_t index, uint8_t value);
 uint8_t settings_get_slot_group_size(void);
 void settings_set_slot_group_size(uint8_t size);
+bool settings_get_smart_polling_enable(void);
+void settings_set_smart_polling_enable(bool enable);
+void settings_init_smart_polling_config(void);
+bool settings_get_ic_polling_enable(void);
+void settings_set_ic_polling_enable(bool enable);
+bool settings_get_id_polling_enable(void);
+void settings_set_id_polling_enable(bool enable);
 #endif

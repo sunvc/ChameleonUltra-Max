@@ -54,6 +54,24 @@
 #define DATA_CMD_GET_SLOT_POLLING_CONFIG        (1044)
 #define DATA_CMD_SET_SLOT_POLLING_CONFIG        (1045)
 #define DATA_CMD_RESET_DEVICE                   (1046)
+#define DATA_CMD_SLOT_ADD                       (1047)
+#define DATA_CMD_SLOT_REMOVE                    (1048)
+#define DATA_CMD_GET_EXTRA_LONG_BUTTON_PRESS_CONFIG (1049)
+#define DATA_CMD_SET_EXTRA_LONG_BUTTON_PRESS_CONFIG (1050)
+#define DATA_CMD_GET_EXTRA_LONG_PRESS_THRESHOLD (1051)
+#define DATA_CMD_SET_EXTRA_LONG_PRESS_THRESHOLD (1052)
+
+// Slot auto-polling aliases used by the companion app (same settings as 1044/1045).
+#define DATA_CMD_GET_DEVICE_AUTO_POLLING        (6038)
+#define DATA_CMD_SET_DEVICE_AUTO_POLLING        (6039)
+#define DATA_CMD_GET_DEVICE_AUTO_POLLING_DELAY  (6040)
+#define DATA_CMD_SET_DEVICE_AUTO_POLLING_DELAY  (6041)
+#define DATA_CMD_GET_SMART_POLLING_ENABLE       (6062)
+#define DATA_CMD_SET_SMART_POLLING_ENABLE       (6063)
+#define DATA_CMD_GET_IC_POLLING_ENABLE          (6046)
+#define DATA_CMD_SET_IC_POLLING_ENABLE          (6047)
+#define DATA_CMD_GET_ID_POLLING_ENABLE          (6048)
+#define DATA_CMD_SET_ID_POLLING_ENABLE          (6049)
 
 //
 // ******************************************************************
@@ -137,6 +155,8 @@
 // ******************************************************************
 //
 #define DATA_CMD_MF1_WRITE_EMU_BLOCK_DATA       (4000)
+// App compatibility: 32-slot builds use 8001 for the same multi-block write.
+#define DATA_CMD_MF1_WRITE_EMU_BLOCK_DATA_32SLOT (8001)
 #define DATA_CMD_HF14A_SET_ANTI_COLL_DATA       (4001)
 #define DATA_CMD_MF1_SET_DETECTION_ENABLE       (4004)
 #define DATA_CMD_MF1_GET_DETECTION_COUNT        (4005)

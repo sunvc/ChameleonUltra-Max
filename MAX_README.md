@@ -37,14 +37,28 @@ clone feature.
 在官方上位机的按键设置里选择 `Full clone card`（整卡克隆）即可分配给
 短按/长按 A 或 B。默认不占用长按 A（官方默认长按 A 是克隆 UID，可自行改）。
 
+按键现在有三档：短按、长按（默认 >1s）、超长按（默认 >3s）。超长按可以单独分配一个
+功能（`1049`/`1050` 读写 A/B 超长按动作，`1051`/`1052` 设置超长阈值）；松手时只触发
+对应的那一档，不会同时触发长按和超长按。短按/长按都设为“无动作”时，超长按仍可工作。
+
+按住 A 或 B 时，LED 会从 1 秒开始每秒多亮一个（最多 8 个），松手后恢复正常卡槽指示；
+可以用它判断当前按到了长按还是超长按档位。
+
 ### 2. 卡槽自动轮询 / Slot auto-polling
 
-仿真模式下按设定间隔自动切换卡槽，依次仿真多张卡；一旦有读卡器激活了当前卡
-（`g_is_field_detected`）立即暂停轮询，读卡器离开后继续。设置项：
+**场驱动**：只有读卡器在场（`g_is_tag_emulating`，HF 或 LF）时才轮询；没有场就停表，
+不会在桌面上自己切槽。场存在时：
+
+* 读卡器 HALT/REQA/SELECT 事件会触发切槽（智能模式按 UID/MRU 优先）；
+* 若场存在但一段时间没有读卡器帧，用配置的间隔做 sweep 兜底；
+* 切槽走 `tag_emulation_change_slot_live()`，不停止/重启 NFC sense，场会话不中断。
+
+设置项：
 
 * 开关（默认关）
-* 间隔：100ms ~ 10s（默认 500ms）
-* 轮询卡槽掩码：8 个卡槽任意组合
+* 间隔：10ms ~ 1s（默认 500ms），到场会话超时兜底
+* 轮询卡槽掩码：最多 255 个卡槽任意组合
+* 智能轮询（UID/MRU 优先，默认开）；IC/HF、ID/LF 可分别开关
 * 可分配按键功能 `Toggle slot polling`（一键开关轮询）
 
 ### 3. 卡组 / Card groups
@@ -75,14 +89,34 @@ clone feature.
 
 | 命令 | 值 | 说明 |
 |---|---|---|
-| `GET_SLOT_POLLING_CONFIG` | 1044 | 读 4 字节 `{enable, interval(100ms), slot_mask, group_size}` |
-| `SET_SLOT_POLLING_CONFIG` | 1045 | 写同上 4 字节（记得再发 1013 保存） |
+| `GET_SLOT_POLLING_CONFIG` | 1044 | 读 `slot_count` 字节，每槽 1 字节（0/1），下标即槽位 0..slot_count-1 |
+| `SET_SLOT_POLLING_CONFIG` | 1045 | 写 `slot_count` 字节每槽列表（1..255 字节；兼容旧 4 字节 `{enable, interval, mask, group}`；记得再发 1013 保存） |
+| `SLOT_ADD` | 1047 | 追加一个卡槽；可带 2 字节大端卡类型（0 或空表示稍后设置）。先检查 FDS 空间，失败返回 0x70；成功返回 1 字节新槽数 |
+| `SLOT_REMOVE` | 1048 | 删除最后一个卡槽（含卡片数据和昵称），最少保留 8 个；成功返回 1 字节新槽数 |
+| `GET_DEVICE_AUTO_POLLING` | 6038 | 读 1 字节：轮询总开关（与 1044/1045 同一份设置，兼容小程序） |
+| `SET_DEVICE_AUTO_POLLING` | 6039 | 写 1 字节开关 |
+| `GET_EXTRA_LONG_BUTTON_PRESS_CONFIG` | 1049 | 读超长按动作：1 字节按键（A/B）→ 1 字节动作 |
+| `SET_EXTRA_LONG_BUTTON_PRESS_CONFIG` | 1050 | 写超长按动作：按键 + 动作 |
+| `GET_EXTRA_LONG_PRESS_THRESHOLD` | 1051 | 读超长按阈值（2 字节大端毫秒） |
+| `SET_EXTRA_LONG_PRESS_THRESHOLD` | 1052 | 写超长按阈值（2 字节大端毫秒） |
+| `GET_DEVICE_AUTO_POLLING_DELAY` | 6040 | 读 2 字节大端：轮询间隔（毫秒） |
+| `SET_DEVICE_AUTO_POLLING_DELAY` | 6041 | 写 2 字节大端毫秒（内部按 10ms 量化，10..1000ms） |
+| `GET_IC_POLLING` / `SET_IC_POLLING` | 6046 / 6047 | HF/IC 是否参与轮询 |
+| `GET_ID_POLLING` / `SET_ID_POLLING` | 6048 / 6049 | LF/ID 是否参与轮询 |
+| `GET_SMART_POLLING` / `SET_SMART_POLLING` | 6062 / 6063 | UID/MRU 智能轮询开关 |
 | `RESET_DEVICE` | 1046 | 保存并软重启 |
 | `MF1_OFFLINE_CLONE` | 2023 | 触发离线整卡克隆（立即返回，作业在主循环同步执行，期间设备不响应其他命令） |
 | `MF1_OFFLINE_CLONE_STATUS` | 2024 | 轮询状态，返回 `{state, missing_sectors}`；state: 0=idle 1=running 2=ok 3=no card 4=not MF1 5=keys missing 6=read fail 7=apply fail。作业执行期间响应会被延迟到作业结束，上位机需容忍超时并重试 |
 
 `GET_DEVICE_SETTINGS (1034)` 现返回 18 字节：官方 13 字节布局不变，`[13]` = sleep timeout（与 GUI 既有约定一致），
-`[14..17]` = 轮询配置。设置版本号 v7 → v8，旧数据自动迁移。
+`[14..17]` = 轮询配置（`[16]` 仅为 256 位 bitmap 第 0 字节，完整 bitmap 用 1044 读）。设置版本号 v8/v9/v10/v11/v12 → v13，旧数据自动迁移；v13 在结构末尾新增 A/B 超长按动作（各 4 bit）和超长按阈值（默认 3000ms）。
+
+> 本分支是 **自适应槽位 + 场驱动智能轮询** 版本：对外槽数 `slot_count` 默认 **8**，可逐槽加到 **255**；
+> 真正的上限是 FDS 空间——M1 1K 约 180 个、M1 4K 约 50 个、ID 卡受 255 槽限制。
+> `GET_SLOT_INFO (1019)` 返回 `slot_count * 4` 字节，`GET_ENABLED_SLOTS (1023)` 返回 `slot_count * 2` 字节。
+> `GET_ALL_SLOT_NICKS (1038)` 支持分页：请求 2 字节 `{start, count}`，每页最多 32 槽；不带参数时返回前 32 槽。
+> 槽位配置结构版本 v8/v9 → v10（68/260 → 2044 字节），升级保留原有槽位：v9 固定 32 槽版本迁移为 32 槽，旧 8 槽版本迁移为 8 槽。
+> FDS 保留页 28（224KB）。注意：1044 的返回格式已改为每槽 1 字节，旧版 Flutter GUI 的轮询页需要同步修改。
 
 ---
 
@@ -125,7 +159,7 @@ clone feature.
 
 | 文件 | 改动 |
 |---|---|
-| `firmware/application/src/settings.h/.c` | 设置 v8：轮询/卡组字段 + 4 个新按键功能枚举 + 迁移 |
+| `firmware/application/src/settings.h/.c` | 设置 v13：轮询/卡组/智能轮询字段 + 10ms 间隔单位 + A/B 超长按动作与阈值 + 迁移 |
 | `firmware/application/src/data_cmd.h` | 5 个新命令号 |
 | `firmware/application/src/app_cmd.c` | 新命令处理器 + settings blob 扩展 |
 | `firmware/application/src/app_main.c` | 新按键功能、轮询状态机、卡组切换、克隆入口与 LED |

@@ -62,6 +62,8 @@ static uint8_t m_nfc_rx_buffer[MAX_NFC_RX_BUFFER_SIZE] = { 0x00 };
 
 /* Optional sniff callback — fires for every received frame */
 static nfc_tag_14a_sniff_cb_t m_sniff_cb = NULL;
+/* Persistent reader-frame hook used by slot polling */
+static nfc_tag_14a_reader_event_cb_t m_reader_event_cb = NULL;
 
 void nfc_tag_14a_set_sniff_cb(nfc_tag_14a_sniff_cb_t cb) {
     m_sniff_cb = cb;
@@ -69,6 +71,25 @@ void nfc_tag_14a_set_sniff_cb(nfc_tag_14a_sniff_cb_t cb) {
 
 void nfc_tag_14a_clear_sniff_cb(void) {
     m_sniff_cb = NULL;
+}
+
+void nfc_tag_14a_set_reader_event_cb(nfc_tag_14a_reader_event_cb_t cb) {
+    m_reader_event_cb = cb;
+}
+
+void nfc_tag_14a_clear_reader_event_cb(void) {
+    m_reader_event_cb = NULL;
+}
+
+nfc_tag_14a_coll_res_reference_t *nfc_tag_14a_get_active_coll_res(void) {
+    return (m_tag_handler.get_coll_res != NULL) ? m_tag_handler.get_coll_res() : NULL;
+}
+
+void nfc_tag_14a_slot_switched(void) {
+    m_tag_state_14a = NFC_TAG_STATE_14A_IDLE;
+    if (m_tag_handler.cb_reset != NULL) {
+        m_tag_handler.cb_reset();
+    }
 }
 
 /* TX sniff: captures card→reader frames at TX_FRAMESTART */
@@ -372,6 +393,10 @@ void nfc_tag_14a_data_process(uint8_t *p_data) {
         szDataBits = nfc_tag_14a_unwrap_frame(p_data, szDataBits, p_data, NULL);
     }
 #endif
+    /* Persistent reader-frame hook, after parity removal so command bytes are clean. */
+    if (m_reader_event_cb != NULL) {
+        m_reader_event_cb(p_data, szDataBits);
+    }
 
     // Start processing the received data, if it is a special frame, you can hand over the data to this link
     if (szDataBits <= 8) {

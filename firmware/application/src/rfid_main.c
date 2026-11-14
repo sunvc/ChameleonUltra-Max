@@ -78,7 +78,7 @@ void tag_mode_enter(void) {
 void light_up_by_slot(void) {
     uint32_t *led_pins = hw_get_led_array();
     // The current lighting logic has not changed very much, so we only need to light up the specified lamp for the time being.
-    uint8_t slot = tag_emulation_get_slot();
+    uint8_t slot = tag_emulation_get_slot() % RGB_LIST_NUM;
     for (int i = 0; i < RGB_LIST_NUM; i++) {
         if (i == slot) {
             nrf_gpio_pin_set(led_pins[i]);
@@ -107,7 +107,7 @@ device_mode_t get_device_mode(void) {
 /**
  * @brief Get the color by slot
  *
- * @param slot slot number, 0 - 7
+ * @param slot slot number, 0 - 31
  * @return uint8_t Color 0R, 1G, 2B
  */
 uint8_t get_color_by_slot(uint8_t slot) {

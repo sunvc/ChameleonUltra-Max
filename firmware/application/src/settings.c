@@ -64,11 +64,25 @@ void settings_init_long_press_threshold_config(void) {
 }
 
 // add on version8
+// add on version13
+void settings_init_extra_long_press_config(void) {
+    config.button_a_extra_long_press = SettingsButtonDisable;
+    config.button_b_extra_long_press = SettingsButtonDisable;
+    config.extra_long_press_threshold = SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_DEFAULT_MS;
+}
+
 void settings_init_slot_polling_config(void) {
     config.slot_polling_enable = false;
     config.slot_polling_interval = SETTINGS_SLOT_POLLING_INTERVAL_DEFAULT;
-    config.slot_polling_slot_mask = SETTINGS_SLOT_POLLING_SLOT_MASK_DEFAULT;
+    memset(config.slot_polling_slot_mask, SETTINGS_SLOT_POLLING_SLOT_MASK_DEFAULT, sizeof(config.slot_polling_slot_mask));
     config.slot_group_size = SETTINGS_SLOT_GROUP_SIZE_DEFAULT;
+}
+
+// add on version11
+void settings_init_smart_polling_config(void) {
+    config.smart_polling_enable = SETTINGS_SMART_POLLING_DEFAULT;
+    config.ic_polling_enable = 1;
+    config.id_polling_enable = 1;
 }
 
 void settings_init_config(void) {
@@ -81,11 +95,28 @@ void settings_init_config(void) {
     settings_init_sleep_timeout_config();
     settings_init_long_press_threshold_config();
     settings_init_slot_polling_config();
+    settings_init_smart_polling_config();
+    settings_init_extra_long_press_config();
+}
+
+// Version 11 and older stored the polling interval in 100 ms units; version 12
+// stores it in 10 ms units so the app can use 10 ms granularity.
+static void settings_migrate_polling_interval_to_10ms(void) {
+    uint16_t interval = (uint16_t)config.slot_polling_interval * 10U;
+    if (interval < SETTINGS_SLOT_POLLING_INTERVAL_MIN) {
+        interval = SETTINGS_SLOT_POLLING_INTERVAL_MIN;
+    }
+    if (interval > SETTINGS_SLOT_POLLING_INTERVAL_MAX) {
+        interval = SETTINGS_SLOT_POLLING_INTERVAL_MAX;
+    }
+    config.slot_polling_interval = (uint8_t)interval;
 }
 
 void settings_migrate(void) {
-    switch (config.version) {
-        case 0:
+    if (config.version < 13) {
+        settings_init_extra_long_press_config();
+    }
+    switch (config.version) {        case 0:
             NRF_LOG_ERROR("Unexpected configuration version detected!");
             settings_init_config();
 
@@ -109,14 +140,58 @@ void settings_migrate(void) {
 
         case 7:
             settings_init_slot_polling_config();
-
-            /*
-             * Add new migration steps ABOVE THIS COMMENT
-             * `settings_update_version_for_config()` and `break` statements should only be used on the last migration step, all the previous steps must fall
-             * through to the next case.
-             */
-
+            settings_init_smart_polling_config();
             settings_update_version_for_config();
+            break;
+        case 8: {
+            // Version 8 stored a 1-byte mask at offset 16 and the group size at
+            // offset 17. New slots default to polled.
+            const uint8_t *old = (const uint8_t *)&config;
+            uint8_t old_mask = old[16];
+            uint8_t old_group = old[17];
+            config.slot_polling_slot_mask[0] = old_mask;
+            memset(config.slot_polling_slot_mask + 1, SETTINGS_SLOT_POLLING_SLOT_MASK_DEFAULT,
+                   sizeof(config.slot_polling_slot_mask) - 1);
+            config.slot_group_size = old_group;
+            settings_init_smart_polling_config();
+            settings_migrate_polling_interval_to_10ms();
+            settings_update_version_for_config();
+            break;
+        }
+        case 9: {
+            // Version 9 stored a 32-bit little-endian mask at offsets 16..19
+            // and the group size at offset 20.
+            const uint8_t *old = (const uint8_t *)&config;
+            uint8_t old_mask[4];
+            uint8_t old_group = old[20];
+            memcpy(old_mask, old + 16, sizeof(old_mask));
+            memcpy(config.slot_polling_slot_mask, old_mask, sizeof(old_mask));
+            memset(config.slot_polling_slot_mask + 4, SETTINGS_SLOT_POLLING_SLOT_MASK_DEFAULT,
+                   sizeof(config.slot_polling_slot_mask) - 4);
+            config.slot_group_size = old_group;
+            settings_init_smart_polling_config();
+            settings_migrate_polling_interval_to_10ms();
+            settings_update_version_for_config();
+            break;
+        }
+        case 10:
+            // Version 10 had no smart polling flag; default it to enabled.
+            settings_init_smart_polling_config();
+            settings_migrate_polling_interval_to_10ms();
+            settings_update_version_for_config();
+            break;
+        case 11: {
+            // Version 11 stored the polling interval in 100 ms units; version 12
+            // stores it in 10 ms units so the app can use 10 ms granularity.
+            settings_migrate_polling_interval_to_10ms();
+            settings_update_version_for_config();
+            break;
+        }
+        case 12:
+            // Version 12 had no extra-long press fields.
+            settings_update_version_for_config();
+            break;
+        case SETTINGS_CURRENT_VERSION:
             break;
         default:
             NRF_LOG_ERROR("Unsupported configuration migration attempted! (%d -> %d)", config.version, SETTINGS_CURRENT_VERSION);
@@ -341,6 +416,58 @@ void settings_set_long_press_threshold(uint16_t duration) {
     config.long_press_threshold = duration;
 }
 
+uint8_t settings_get_extra_long_button_press_config(char which) {
+    switch (which) {
+        case 'a':
+        case 'A':
+            return config.button_a_extra_long_press;
+
+        case 'b':
+        case 'B':
+            return config.button_b_extra_long_press;
+
+        default:
+            APP_ERROR_CHECK_BOOL(false);
+            return SettingsButtonDisable;
+    }
+}
+
+void settings_set_extra_long_button_press_config(char which, uint8_t value) {
+    switch (which) {
+        case 'a':
+        case 'A':
+            config.button_a_extra_long_press = value;
+            break;
+
+        case 'b':
+        case 'B':
+            config.button_b_extra_long_press = value;
+            break;
+
+        default:
+            APP_ERROR_CHECK_BOOL(false);
+            break;
+    }
+}
+
+uint16_t settings_get_extra_long_press_threshold(void) {
+    uint16_t duration = config.extra_long_press_threshold;
+    if (duration < SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MIN_MS) {
+        duration = SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_DEFAULT_MS;
+    }
+    return duration;
+}
+
+void settings_set_extra_long_press_threshold(uint16_t duration) {
+    if (duration < SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MIN_MS) {
+        duration = SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MIN_MS;
+    }
+    if (duration > SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MAX_MS) {
+        duration = SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MAX_MS;
+    }
+    config.extra_long_press_threshold = duration;
+}
+
 bool settings_get_slot_polling_enable(void) {
     return config.slot_polling_enable != 0;
 }
@@ -366,12 +493,29 @@ void settings_set_slot_polling_interval(uint8_t interval) {
     config.slot_polling_interval = interval;
 }
 
-uint8_t settings_get_slot_polling_slot_mask(void) {
+const uint8_t *settings_get_slot_polling_slot_mask(void) {
     return config.slot_polling_slot_mask;
 }
 
-void settings_set_slot_polling_slot_mask(uint8_t mask) {
-    config.slot_polling_slot_mask = mask;
+bool settings_get_slot_polling_slot_mask_bit(uint8_t slot) {
+    return (config.slot_polling_slot_mask[slot >> 3] >> (slot & 7)) & 1;
+}
+
+void settings_set_slot_polling_slot_mask_bit(uint8_t slot, bool enable) {
+    uint8_t mask = 1U << (slot & 7);
+    if (enable) {
+        config.slot_polling_slot_mask[slot >> 3] |= mask;
+    } else {
+        config.slot_polling_slot_mask[slot >> 3] &= ~mask;
+    }
+}
+
+uint8_t settings_get_slot_polling_slot_mask_byte(uint8_t index) {
+    return config.slot_polling_slot_mask[index];
+}
+
+void settings_set_slot_polling_slot_mask_byte(uint8_t index, uint8_t value) {
+    config.slot_polling_slot_mask[index] = value;
 }
 
 uint8_t settings_get_slot_group_size(void) {
@@ -384,4 +528,28 @@ void settings_set_slot_group_size(uint8_t size) {
         size = SETTINGS_SLOT_GROUP_SIZE_DEFAULT;
     }
     config.slot_group_size = size;
+}
+
+bool settings_get_smart_polling_enable(void) {
+    return config.smart_polling_enable != 0;
+}
+
+void settings_set_smart_polling_enable(bool enable) {
+    config.smart_polling_enable = enable ? 1 : 0;
+}
+
+bool settings_get_ic_polling_enable(void) {
+    return config.ic_polling_enable != 0;
+}
+
+void settings_set_ic_polling_enable(bool enable) {
+    config.ic_polling_enable = enable ? 1 : 0;
+}
+
+bool settings_get_id_polling_enable(void) {
+    return config.id_polling_enable != 0;
+}
+
+void settings_set_id_polling_enable(bool enable) {
+    config.id_polling_enable = enable ? 1 : 0;
 }
