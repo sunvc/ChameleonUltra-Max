@@ -4,6 +4,7 @@
 #include "usb_main.h"
 #include "rfid_main.h"
 #include "ble_main.h"
+#include "findmy_beacon.h"
 #include "syssleep.h"
 #include "hex_utils.h"
 #include "data_cmd.h"
@@ -569,6 +570,67 @@ static data_frame_tx_t *cmd_processor_set_sleep_timeout(uint16_t cmd, uint16_t s
     // Persist to flash immediately so a power cycle keeps this setting.
     settings_save_config();
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+/**@brief Apple Find My (OpenHaystack) beacon configuration.
+ *
+ * GET_FINDMY_BEACON_CONFIG   -> {enable, key[28]} (29 bytes)
+ * SET_FINDMY_BEACON_CONFIG   <- {enable, key[28]} | key[28] (key only, keeps enable) | 1 byte (enable only)
+ * GET_FINDMY_BEACON_STATUS   -> {enabled, active, adv_mode}
+ *                               adv_mode: 0 = dedicated second advertising set,
+ *                                         1 = shared set (beacon owns the BLE
+ *                                             advertisement while it is on)
+ */
+static data_frame_tx_t *cmd_processor_get_findmy_beacon_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    findmy_beacon_config_t cfg;
+    uint8_t payload[1 + APP_FINDMY_BEACON_KEY_LEN];
+    findmy_beacon_get_config(&cfg);
+    payload[0] = cfg.enable ? 1 : 0;
+    memcpy(payload + 1, cfg.key, APP_FINDMY_BEACON_KEY_LEN);
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), payload);
+}
+
+static bool findmy_key_is_zero(const uint8_t *key) {
+    for (uint8_t i = 0; i < APP_FINDMY_BEACON_KEY_LEN; i++) {
+        if (key[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static data_frame_tx_t *cmd_processor_set_findmy_beacon_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    findmy_beacon_config_t cfg;
+    findmy_beacon_get_config(&cfg);
+
+    if (length == 1) {
+        cfg.enable = data[0] ? 1 : 0;
+    } else if (length == APP_FINDMY_BEACON_KEY_LEN) {
+        memcpy(cfg.key, data, APP_FINDMY_BEACON_KEY_LEN);
+    } else if (length == 1 + APP_FINDMY_BEACON_KEY_LEN) {
+        cfg.enable = data[0] ? 1 : 0;
+        memcpy(cfg.key, data + 1, APP_FINDMY_BEACON_KEY_LEN);
+    } else {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+
+    if (cfg.enable && findmy_key_is_zero(cfg.key)) {
+        // Enabling without a provisioned key would advertise a bogus address.
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
+
+    if (!findmy_beacon_set_config(&cfg)) {
+        return data_frame_make(cmd, STATUS_FLASH_WRITE_FAIL, 0, NULL);
+    }
+    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+}
+
+static data_frame_tx_t *cmd_processor_get_findmy_beacon_status(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
+    uint8_t payload[3];
+    payload[0] = findmy_beacon_is_enabled() ? 1 : 0;
+    payload[1] = findmy_beacon_is_active() ? 1 : 0;
+    payload[2] = ble_findmy_uses_two_sets() ? 0 : 1;
+    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload), payload);
 }
 
 static data_frame_tx_t *cmd_processor_get_ble_pairing_enable(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -3650,6 +3712,9 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_SET_EXTRA_LONG_BUTTON_PRESS_CONFIG, NULL,                  cmd_processor_set_extra_long_button_press_config, NULL             },
     {    DATA_CMD_GET_EXTRA_LONG_PRESS_THRESHOLD, NULL,                      cmd_processor_get_extra_long_press_threshold, NULL                 },
     {    DATA_CMD_SET_EXTRA_LONG_PRESS_THRESHOLD, NULL,                      cmd_processor_set_extra_long_press_threshold, NULL                 },
+    {    DATA_CMD_GET_FINDMY_BEACON_CONFIG,     NULL,                        cmd_processor_get_findmy_beacon_config,      NULL                   },
+    {    DATA_CMD_SET_FINDMY_BEACON_CONFIG,     NULL,                        cmd_processor_set_findmy_beacon_config,      NULL                   },
+    {    DATA_CMD_GET_FINDMY_BEACON_STATUS,     NULL,                        cmd_processor_get_findmy_beacon_status,      NULL                   },
 
 #if defined(PROJECT_CHAMELEON_ULTRA)
 

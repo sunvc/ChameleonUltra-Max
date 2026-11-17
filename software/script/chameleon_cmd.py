@@ -1594,6 +1594,69 @@ class ChameleonCMD:
         return self.device.send_cmd_sync(Command.SET_SLEEP_TIMEOUT, data)
 
     @expect_response(Status.SUCCESS)
+    def get_findmy_beacon_config(self):
+        """
+        Get the Find My (OpenHaystack) beacon configuration.
+
+        Returns parsed = {'enable': bool, 'key': bytes(28)}
+        """
+        resp = self.device.send_cmd_sync(Command.GET_FINDMY_BEACON_CONFIG)
+        if resp.status == Status.SUCCESS:
+            if len(resp.data) != 29:
+                raise ValueError(f"Invalid FindMy config length: {len(resp.data)}")
+            resp.parsed = {
+                'enable': resp.data[0] != 0,
+                'key': bytes(resp.data[1:29]),
+            }
+        return resp
+
+    @expect_response(Status.SUCCESS)
+    def set_findmy_beacon_config(self, enable: bool = None, key: bytes = None):
+        """
+        Set the Find My beacon configuration.
+
+        :param enable: enable/disable the beacon (None keeps the current state)
+        :param key: 28-byte P-224 public key ("advertisement key" in the
+                    OpenHaystack app, copied as Base64 or hex)
+        """
+        if key is not None:
+            if isinstance(key, str):
+                key = bytes.fromhex(key.replace(" ", "").replace(":", ""))
+            if len(key) != 28:
+                raise ValueError("Find My key must be exactly 28 bytes (P-224 X coordinate)")
+        if enable is not None:
+            enable = bool(enable)
+
+        if enable is not None and key is not None:
+            data = struct.pack('!B', 1 if enable else 0) + key
+        elif key is not None:
+            data = key
+        elif enable is not None:
+            data = struct.pack('!B', 1 if enable else 0)
+        else:
+            raise ValueError("Nothing to set: provide enable and/or key")
+
+        return self.device.send_cmd_sync(Command.SET_FINDMY_BEACON_CONFIG, data)
+
+    @expect_response(Status.SUCCESS)
+    def get_findmy_beacon_status(self):
+        """
+        Get the Find My beacon runtime state.
+
+        Returns parsed = {'enabled': bool, 'active': bool, 'mode': 'two_set'|'shared_set'}
+        """
+        resp = self.device.send_cmd_sync(Command.GET_FINDMY_BEACON_STATUS)
+        if resp.status == Status.SUCCESS:
+            if len(resp.data) != 3:
+                raise ValueError(f"Invalid FindMy status length: {len(resp.data)}")
+            resp.parsed = {
+                'enabled': resp.data[0] != 0,
+                'active': resp.data[1] != 0,
+                'mode': 'shared_set' if resp.data[2] else 'two_set',
+            }
+        return resp
+
+    @expect_response(Status.SUCCESS)
     def reset_settings(self):
         """
         Reset settings stored in flash memory

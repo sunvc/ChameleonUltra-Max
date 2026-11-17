@@ -34,6 +34,7 @@ NRF_LOG_MODULE_REGISTER();
 #include "dataframe.h"
 #include "battery_health.h"
 #include "fds_util.h"
+#include "findmy_beacon.h"
 #include "hex_utils.h"
 #include "rfid_main.h"
 #include "syssleep.h"
@@ -1589,6 +1590,22 @@ static void run_button_function_by_settings(settings_button_function_t sbf) {
             break;
         }
 
+        case SettingsButtonToggleFindMyBeacon: {
+            bool enable = !findmy_beacon_is_enabled();
+            if (!enable || findmy_beacon_has_key()) {
+                findmy_beacon_set_led_feedback(true);
+                bool ok = findmy_beacon_set_enable(enable);
+                findmy_beacon_set_led_feedback(false);
+                if (!ok) {
+                    offline_status_error();
+                }
+            } else {
+                // No key provisioned yet; blink red and keep the beacon off.
+                offline_status_error();
+            }
+            break;
+        }
+
         default:
             NRF_LOG_ERROR("Unsupported button function");
             break;
@@ -1719,6 +1736,7 @@ int main(void) {
     power_management_init();  // Power management initialization
     usb_cdc_init();           // USB cdc emulation initialization
     ble_slave_init();         // Bluetooth protocol stack initialization
+    findmy_beacon_init();     // Restore the FindMy beacon key/state and start advertising if enabled
 
     rng_drv_and_srand_init(); // Random number generator initialization
     bsp_timer_init();         // Initialize timeout timer

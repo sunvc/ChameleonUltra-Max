@@ -57,6 +57,8 @@ typedef enum {
     SettingsButtonCycleGroup = 8U,
     // Toggle slot auto-polling on/off
     SettingsButtonToggleSlotPolling = 9U,
+    // Toggle the Apple Find My (OpenHaystack) beacon on/off
+    SettingsButtonToggleFindMyBeacon = 10U,
 } settings_button_function_t;
 
 typedef struct ALIGN_U32 {

@@ -2,6 +2,7 @@ import binascii
 import glob
 import math
 import os
+import base64
 import tempfile
 import re
 import subprocess
@@ -7359,9 +7360,65 @@ class HWSettingsSleepTimeout(DeviceRequiredUnit):
             print(f"Current wake timeout: {current} seconds")
 
 
+@hw_settings.command("findmy")
+class HWSettingsFindMyBeacon(DeviceRequiredUnit):
+    def args_parser(self) -> ArgumentParserNoExit:
+        parser = ArgumentParserNoExit()
+        parser.description = (
+            "Get, set or toggle the Apple Find My (OpenHaystack) beacon. "
+            "The key is the 'advertisement key' of an accessory in the "
+            "OpenHaystack macOS app (28 bytes, Base64 or hex)."
+        )
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument("--key", metavar="KEY",
+                           help="28-byte P-224 public key (Base64 or hex)")
+        group.add_argument("--enable", action="store_true",
+                           help="Enable the beacon")
+        group.add_argument("--disable", action="store_true",
+                           help="Disable the beacon")
+        return parser
+
+    @staticmethod
+    def _key_to_bytes(key: str) -> bytes:
+        text = key.strip()
+        try:
+            if len(text) == 56 and all(c in "0123456789abcdefABCDEF" for c in text):
+                return bytes.fromhex(text)
+            cleaned = text.replace(" ", "").replace(":", "").replace("\\x", "")
+            if len(cleaned) == 56 and all(c in "0123456789abcdefABCDEF" for c in cleaned):
+                return bytes.fromhex(cleaned)
+            return base64.b64decode(text, validate=True)
+        except (ValueError, binascii.Error):
+            return b""
+
+    def on_exec(self, args: argparse.Namespace):
+        if args.key is not None:
+            key = self._key_to_bytes(args.key)
+            if len(key) != 28:
+                print(color_string((CR, "Error: the key must be 28 bytes "
+                                        "(the OpenHaystack advertisement key, "
+                                        "Base64 or hex).")))
+                return
+            self.cmd.set_findmy_beacon_config(key=key)
+            print("Find My beacon key updated.")
+        if args.enable:
+            self.cmd.set_findmy_beacon_config(enable=True)
+            print("Find My beacon enabled.")
+        elif args.disable:
+            self.cmd.set_findmy_beacon_config(enable=False)
+            print("Find My beacon disabled.")
+
+        if args.key is None and not args.enable and not args.disable:
+            cfg = self.cmd.get_findmy_beacon_config()
+            status = self.cmd.get_findmy_beacon_status()
+            print(f"Enabled: {cfg['enable']}  Active: {status['active']}  "
+                  f"Advertising: {status['mode']}")
+            print(f"Key (hex):    {cfg['key'].hex()}")
+            print(f"Key (Base64): {base64.b64encode(cfg['key']).decode()}")
+
+
 @hw_settings.command("bleclearbonds")
 class HWSettingsBleClearBonds(DeviceRequiredUnit):
-
     def args_parser(self) -> ArgumentParserNoExit:
         parser = ArgumentParserNoExit()
         parser.description = "Clear all BLE bindings. Warning: effect is immediate!"
