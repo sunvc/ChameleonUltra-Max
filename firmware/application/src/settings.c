@@ -66,8 +66,8 @@ void settings_init_long_press_threshold_config(void) {
 // add on version8
 // add on version13
 void settings_init_extra_long_press_config(void) {
-    config.button_a_extra_long_press = SettingsButtonDisable;
-    config.button_b_extra_long_press = SettingsButtonDisable;
+    config.button_a_extra_long_press = SettingsButtonFullClone;
+    config.button_b_extra_long_press = SettingsButtonToggleSlotPolling;
     config.extra_long_press_threshold = SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_DEFAULT_MS;
 }
 
@@ -189,6 +189,30 @@ void settings_migrate(void) {
         }
         case 12:
             // Version 12 had no extra-long press fields.
+            settings_update_version_for_config();
+            break;
+        case 13:
+            // Version 14 is superseded: button-based BLE mode switching was
+            // removed, so no FindMy binding is installed here.
+            settings_update_version_for_config();
+            break;
+        case 14:
+            // Version 15 caps the extra-long press threshold at 5 s.
+            settings_set_extra_long_press_threshold(settings_get_extra_long_press_threshold());
+            settings_update_version_for_config();
+            break;
+        case 15:
+            // Version 16 removed the button action that toggled the FindMy
+            // beacon and installs the new defaults: full card clone on A and
+            // the auto-polling toggle on B.
+            if (settings_get_extra_long_button_press_config('a') == SettingsButtonToggleFindMyBeacon ||
+                    settings_get_extra_long_button_press_config('a') == SettingsButtonDisable) {
+                settings_set_extra_long_button_press_config('a', SettingsButtonFullClone);
+            }
+            if (settings_get_extra_long_button_press_config('b') == SettingsButtonToggleFindMyBeacon ||
+                    settings_get_extra_long_button_press_config('b') == SettingsButtonDisable) {
+                settings_set_extra_long_button_press_config('b', SettingsButtonToggleSlotPolling);
+            }
             settings_update_version_for_config();
             break;
         case SETTINGS_CURRENT_VERSION:

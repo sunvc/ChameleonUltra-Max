@@ -5,7 +5,7 @@
 
 #include "utils.h"
 
-#define SETTINGS_CURRENT_VERSION 13
+#define SETTINGS_CURRENT_VERSION 16
 #define SETTINGS_SLEEP_TIMEOUT_DEFAULT_S 8   // default wake timeout in seconds (matches SLEEP_DELAY_MS_BUTTON_WAKEUP)
 #define SETTINGS_SLEEP_TIMEOUT_MIN_S      5
 #define SETTINGS_SLEEP_TIMEOUT_MAX_S      60
@@ -13,7 +13,7 @@
 #define SETTINGS_LONG_PRESS_THRESHOLD_MIN_MS     200
 #define SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_DEFAULT_MS 3000
 #define SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MIN_MS     1500
-#define SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MAX_MS     10000
+#define SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_MAX_MS     5000
 #define BLE_PAIRING_KEY_LEN 6
 #define DEFAULT_BLE_PAIRING_KEY "123456"  // length must == 6
 
@@ -57,6 +57,8 @@ typedef enum {
     SettingsButtonCycleGroup = 8U,
     // Toggle slot auto-polling on/off
     SettingsButtonToggleSlotPolling = 9U,
+    // Toggle the Apple Find My (OpenHaystack) beacon on/off
+    SettingsButtonToggleFindMyBeacon = 10U,
 } settings_button_function_t;
 
 typedef struct ALIGN_U32 {

@@ -18,8 +18,11 @@
 #include "app_timer.h"
 #include "app_util_platform.h"
 
+#include <string.h>
+
 #include "syssleep.h"
 #include "ble_main.h"
+#include "findmy_beacon.h"
 #include "dataframe.h"
 #include "hw_connect.h"
 #include "settings.h"
@@ -103,6 +106,39 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 volatile bool g_is_ble_connected = false;
 volatile bool g_is_low_battery_shutdown = false;
 static ble_opt_t m_static_pin_option;
+
+// Find My / OpenHaystack beacon: a second, non-connectable advertising set.
+// The S140 headers declare a maximum of one advertising set, so the two-set
+// configuration is attempted at boot and the code falls back to sharing the
+// primary (connectable) set when the stack refuses it.
+#define APP_FINDMY_ADV_INTERVAL 3200                /**< 2 s in units of 0.625 ms, as required by the offline finding spec. */
+static bool m_findmy_adv_two_sets_supported = false;
+static uint8_t m_findmy_adv_handle = BLE_GAP_ADV_SET_HANDLE_NOT_SET;
+static bool m_findmy_adv_active = false;
+static bool m_findmy_shares_primary_set = false;
+static bool m_findmy_address_applied = false;
+static ble_gap_addr_t m_original_adv_addr;
+static ble_gap_addr_t m_applied_adv_addr;
+static uint8_t m_findmy_key[APP_FINDMY_BEACON_KEY_LEN];
+
+static uint8_t m_findmy_adv_data[31];
+static ble_gap_adv_params_t m_findmy_adv_params = {
+    .properties = {
+        .type = BLE_GAP_ADV_TYPE_NONCONNECTABLE_NONSCANNABLE_UNDIRECTED,
+        .anonymous = 0,
+        .include_tx_power = 0,
+    },
+    .p_peer_addr = NULL,
+    .interval = APP_FINDMY_ADV_INTERVAL,
+    .duration = 0,
+    .max_adv_evts = 0,
+    .channel_mask = {0, 0, 0, 0, 0},
+    .filter_policy = BLE_GAP_ADV_FP_ANY,
+    .primary_phy = BLE_GAP_PHY_1MBPS,
+    .secondary_phy = BLE_GAP_PHY_1MBPS,
+    .set_id = 0,
+    .scan_req_notification = 0,
+};
 
 // Simple function to provide an index to the next input buffer
 // Will simply alernate between 0 and 1 when SAADC_BUF_COUNT is 2
@@ -441,13 +477,15 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context) {
             // LED indication will be changed when advertising starts.
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
             g_is_ble_connected = false;
-            // Restart advertising right away: the device otherwise stays awake but
-            // non-discoverable after a disconnect, and a button press while awake only
-            // cancels the sleep timer (it does not restart advertising), so the host
-            // cannot reconnect until the device sleeps and is woken again.
+            // A pending FindMy address update could not be applied while the
+            // link was up; retry it now that no identity address is bound.
+            findmy_beacon_on_ble_disconnected();
+            // Keep the connectable advertisement up so the app can reconnect.
+            // The idle timeout then switches back to the FindMy broadcast
+            // (AirTag switch on) or hibernates the device.
             advertising_start(false);
             // call sleep_timer_start *after* unsetting g_is_ble_connected
-            sleep_timer_start(SLEEP_DELAY_MS_BLE_DISCONNECTED);
+            sleep_timer_start(settings_get_sleep_timeout() * 1000U);
             break;
 
         case BLE_GAP_EVT_PHY_UPDATE_REQUEST: {
@@ -524,9 +562,44 @@ static void ble_stack_init(void) {
     err_code = nrf_sdh_ble_default_cfg_set(APP_BLE_CONN_CFG_TAG, &ram_start);
     APP_ERROR_CHECK(err_code);
 
+    // Try to reserve a second advertising set for the Find My beacon. The
+    // S140 headers declare a maximum of one set, so this may be rejected;
+    // re-setting the role count is documented to be allowed before enable().
+    ble_cfg_t ble_cfg;
+    memset(&ble_cfg, 0, sizeof(ble_cfg));
+    ble_cfg.gap_cfg.role_count_cfg.adv_set_count      = 2;
+    ble_cfg.gap_cfg.role_count_cfg.periph_role_count  = 1;
+    ble_cfg.gap_cfg.role_count_cfg.central_role_count = 0;
+    ble_cfg.gap_cfg.role_count_cfg.central_sec_count  = 0;
+    ret_code_t cfg_err = sd_ble_cfg_set(BLE_GAP_CFG_ROLE_COUNT, &ble_cfg, ram_start);
+    m_findmy_adv_two_sets_supported = (cfg_err == NRF_SUCCESS);
+    if (!m_findmy_adv_two_sets_supported) {
+        NRF_LOG_WARNING("Two advertising sets refused by SoftDevice (%d)", cfg_err);
+    }
+
     // Enable BLE stack.
     err_code = nrf_sdh_ble_enable(&ram_start);
+    if ((err_code != NRF_SUCCESS) && m_findmy_adv_two_sets_supported) {
+        // Not enough RAM was reserved for two sets; retry with the default.
+        NRF_LOG_WARNING("BLE enable failed (%d) with two advertising sets, retrying with one", err_code);
+        memset(&ble_cfg, 0, sizeof(ble_cfg));
+        ble_cfg.gap_cfg.role_count_cfg.adv_set_count     = 1;
+        ble_cfg.gap_cfg.role_count_cfg.periph_role_count = 1;
+        APP_ERROR_CHECK(sd_ble_cfg_set(BLE_GAP_CFG_ROLE_COUNT, &ble_cfg, ram_start));
+        m_findmy_adv_two_sets_supported = false;
+        err_code = nrf_sdh_ble_enable(&ram_start);
+    }
     APP_ERROR_CHECK(err_code);
+
+    // Remember the factory random static address so the beacon can restore it
+    // when the user turns the beacon off again.
+    err_code = sd_ble_gap_addr_get(&m_original_adv_addr);
+    if (err_code != NRF_SUCCESS) {
+        memset(&m_original_adv_addr, 0, sizeof(m_original_adv_addr));
+        m_original_adv_addr.addr_type = BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
+    }
+    m_applied_adv_addr = m_original_adv_addr;
+    NRF_LOG_INFO("FindMy mode: %s", m_findmy_adv_two_sets_supported ? "two advertising sets" : "shared advertising set");
 
     // Register a handler for BLE events.
     NRF_SDH_BLE_OBSERVER(m_ble_observer, APP_BLE_OBSERVER_PRIO, ble_evt_handler, NULL);
@@ -613,6 +686,12 @@ static void whitelist_set(pm_peer_id_list_skip_t skip) {
 /**@brief Function for starting advertising.
  */
 void advertising_start(bool erase_bonds) {
+    if (m_findmy_shares_primary_set && m_findmy_adv_active) {
+        // Shared-set mode: the FindMy beacon currently owns the only
+        // advertising set. Keep the beacon on air until it is switched off;
+        // it restarts the connectable advertisement by itself.
+        return;
+    }
     if (erase_bonds == true && settings_get_ble_pairing_enable_first_load()) {
         // Advertising is started by PM_EVT_PEERS_DELETE_SUCCEEDED event.
         // So we don't call `ble_advertising_start()` after `delete_bonds_all()`.
@@ -630,7 +709,196 @@ void advertising_start(bool erase_bonds) {
  * @brief Function for stop advertising.
  */
 void advertising_stop(void) {
+    if (m_findmy_shares_primary_set && m_findmy_adv_active) {
+        // The beacon owns the shared set; stopping the application
+        // advertisement must not take the beacon off air.
+        return;
+    }
     sd_ble_gap_adv_stop(m_advertising.adv_handle);
+}
+
+/**@brief Fill the 31-byte Find My (offline finding) advertisement in place.
+ *
+ * Layout, identical to the OpenHaystack reference firmware:
+ *   0x1e, 0xff, 0x4c, 0x00, 0x12, 0x19, status(0),
+ *   key[6..27] (22 bytes), key[0] >> 6, hint(0)
+ */
+static void findmy_adv_data_build(void) {
+    m_findmy_adv_data[0] = 0x1e; // AD length: 30 bytes follow
+    m_findmy_adv_data[1] = 0xff; // Manufacturer Specific Data
+    m_findmy_adv_data[2] = 0x4c; // Apple company ID 0x004C, little endian
+    m_findmy_adv_data[3] = 0x00;
+    m_findmy_adv_data[4] = 0x12; // Offline Finding type
+    m_findmy_adv_data[5] = 0x19; // Offline Finding data length (25)
+    m_findmy_adv_data[6] = 0x00; // Status
+    memcpy(&m_findmy_adv_data[7], &m_findmy_key[6], 22);
+    m_findmy_adv_data[29] = m_findmy_key[0] >> 6; // top two bits displaced by the address marker
+    m_findmy_adv_data[30] = 0x00;                 // Hint
+}
+
+void ble_findmy_adv_update(const uint8_t key[APP_FINDMY_BEACON_KEY_LEN]) {
+    memcpy(m_findmy_key, key, sizeof(m_findmy_key));
+    findmy_adv_data_build();
+}
+
+/**@brief Apply a new identity address, pausing advertising sets as needed.
+ *
+ * The SoftDevice only accepts an identity address change while nothing is
+ * advertising and no link is up; the connectable advertisement is stopped for
+ * the duration of the call and restarted afterwards. An active connection
+ * still makes the call fail, which the caller defers.
+ */
+static bool findmy_apply_identity_addr(const ble_gap_addr_t *addr) {
+    bool restart_advertising = false;
+    if (m_advertising.adv_mode_current != BLE_ADV_MODE_IDLE) {
+        sd_ble_gap_adv_stop(m_advertising.adv_handle);
+        m_advertising.adv_mode_current = BLE_ADV_MODE_IDLE;
+        restart_advertising = true;
+    }
+
+    ret_code_t err;
+    // In shared-set mode the address may only change while no set is running;
+    // in two-set mode only the dedicated set has to be paused.
+    bool findmy_paused = false;
+    if (m_findmy_adv_active && m_findmy_adv_two_sets_supported) {
+        sd_ble_gap_adv_stop(m_findmy_adv_handle);
+        findmy_paused = true;
+    }
+    err = sd_ble_gap_addr_set(addr);
+    if (findmy_paused) {
+        sd_ble_gap_adv_start(m_findmy_adv_handle, APP_BLE_CONN_CFG_TAG);
+    }
+    if (err == NRF_SUCCESS) {
+        m_applied_adv_addr = *addr;
+        m_findmy_address_applied = true;
+    } else {
+        NRF_LOG_DEBUG("FindMy address set refused (%d), will retry later", err);
+    }
+
+    if (restart_advertising) {
+        advertising_start(false);
+    }
+    return err == NRF_SUCCESS;
+}
+
+bool ble_findmy_set_address(const uint8_t key[APP_FINDMY_BEACON_KEY_LEN]) {
+    ble_gap_addr_t addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.addr_type = BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
+    // ble_gap_addr_t::addr is little endian (LSB = on-air octet 0). The key
+    // bytes go most significant first on air: octet0 = key[0] | 0b11.
+    addr.addr[5] = key[0] | 0xC0;
+    addr.addr[4] = key[1];
+    addr.addr[3] = key[2];
+    addr.addr[2] = key[3];
+    addr.addr[1] = key[4];
+    addr.addr[0] = key[5];
+
+    if (m_findmy_address_applied && memcmp(addr.addr, m_applied_adv_addr.addr, 6) == 0) {
+        return true;
+    }
+    return findmy_apply_identity_addr(&addr);
+}
+
+bool ble_findmy_restore_address(void) {
+    if (!m_findmy_address_applied) {
+        return true;
+    }
+    bool ok = findmy_apply_identity_addr(&m_original_adv_addr);
+    if (ok) {
+        m_findmy_address_applied = false;
+    }
+    return ok;
+}
+
+bool ble_findmy_advertising_start(void) {
+    if (m_findmy_adv_active) {
+        return true;
+    }
+
+    ble_gap_adv_data_t adv_data;
+    memset(&adv_data, 0, sizeof(adv_data));
+    adv_data.adv_data.p_data = m_findmy_adv_data;
+    adv_data.adv_data.len = sizeof(m_findmy_adv_data);
+
+    if (m_findmy_adv_two_sets_supported) {
+        // Dedicated second set; the connectable advertisement keeps running.
+        ret_code_t err = sd_ble_gap_adv_set_configure(&m_findmy_adv_handle, &adv_data, &m_findmy_adv_params);
+        if (err != NRF_SUCCESS) {
+            if (err == NRF_ERROR_NO_MEM || err == NRF_ERROR_RESOURCES) {
+                // The SoftDevice accepted the two-set configuration at boot
+                // but cannot hand out a second handle; use the shared set.
+                NRF_LOG_WARNING("Second advertising set unavailable (%d), falling back to shared set", err);
+                m_findmy_adv_handle = BLE_GAP_ADV_SET_HANDLE_NOT_SET;
+                m_findmy_adv_two_sets_supported = false;
+                return ble_findmy_advertising_start();
+            }
+            NRF_LOG_ERROR("FindMy set configure failed: %d", err);
+            return false;
+        }
+        err = sd_ble_gap_adv_start(m_findmy_adv_handle, APP_BLE_CONN_CFG_TAG);
+        if (err != NRF_SUCCESS) {
+            NRF_LOG_ERROR("FindMy set start failed: %d", err);
+            return false;
+        }
+        m_findmy_adv_active = true;
+        return true;
+    }
+
+    // Shared-set fallback: the beacon needs the only advertising set, so the
+    // connectable advertisement pauses until the beacon is switched off. The
+    // handle must be the ble_advertising module's own variable: the SoftDevice
+    // hands out its single handle once, so configuring a separate handle here
+    // would leave the module unable to advertise again.
+    if (m_conn_handle != BLE_CONN_HANDLE_INVALID) {
+        NRF_LOG_WARNING("FindMy beacon cannot take the shared set while connected");
+        return false;
+    }
+    sd_ble_gap_adv_stop(m_advertising.adv_handle);
+    m_advertising.adv_mode_current = BLE_ADV_MODE_IDLE;
+    ble_findmy_set_address(m_findmy_key);
+    ret_code_t err = sd_ble_gap_adv_set_configure(&m_advertising.adv_handle, &adv_data, &m_findmy_adv_params);
+    if (err != NRF_SUCCESS) {
+        NRF_LOG_ERROR("FindMy shared set configure failed: %d", err);
+        advertising_start(false);
+        return false;
+    }
+    m_findmy_shares_primary_set = true;
+    err = sd_ble_gap_adv_start(m_advertising.adv_handle, APP_BLE_CONN_CFG_TAG);
+    if (err != NRF_SUCCESS) {
+        NRF_LOG_ERROR("FindMy shared set start failed: %d", err);
+        m_findmy_shares_primary_set = false;
+        advertising_start(false);
+        return false;
+    }
+    m_findmy_adv_active = true;
+    return true;
+}
+
+void ble_findmy_advertising_stop(void) {
+    if (!m_findmy_adv_active) {
+        return;
+    }
+
+    sd_ble_gap_adv_stop(m_findmy_shares_primary_set ? m_advertising.adv_handle : m_findmy_adv_handle);
+    m_findmy_adv_active = false;
+
+    if (m_findmy_shares_primary_set) {
+        // Hand the set back to the ble_advertising module and restore the
+        // factory identity address. The module keeps its handle, so it can
+        // simply reconfigure and restart.
+        m_findmy_shares_primary_set = false;
+        ble_findmy_restore_address();
+        advertising_start(false);
+    }
+}
+
+bool ble_findmy_is_advertising(void) {
+    return m_findmy_adv_active;
+}
+
+bool ble_findmy_uses_two_sets(void) {
+    return m_findmy_adv_two_sets_supported;
 }
 
 /**@brief Function for handling Peer Manager events.

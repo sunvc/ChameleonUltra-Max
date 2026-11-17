@@ -34,6 +34,7 @@ NRF_LOG_MODULE_REGISTER();
 #include "dataframe.h"
 #include "battery_health.h"
 #include "fds_util.h"
+#include "findmy_beacon.h"
 #include "hex_utils.h"
 #include "rfid_main.h"
 #include "syssleep.h"
@@ -299,6 +300,15 @@ static void timer_button_event_handle(void *arg) {
     // Check here if the current GPIO is at the pressed level
     if (nrf_gpio_pin_read(pin) == 1) {
         if (pin == BUTTON_1) {
+            // Any physical press is an activation: while the AirTag beacon is
+            // broadcasting, hand the advertising set back to the connectable
+            // advertisement so the app can connect. The idle timeout switches
+            // the device back to broadcasting.
+            bool entered_ble = false;
+            if (!m_is_b_btn_press && findmy_beacon_is_enabled() && findmy_beacon_is_active()) {
+                findmy_beacon_enter_ble_mode();
+                entered_ble = true;
+            }
             // If button is disabled, we can't dispatch key event.
             if (button_has_any_function('b')) {
                 // Only latch the timestamp on the initial press: GPIO uses
@@ -307,6 +317,10 @@ static void timer_button_event_handle(void *arg) {
                 if (!m_is_b_btn_press) {
                     NRF_LOG_INFO("BUTTON_B_PRESS");
                     m_last_btn_press = app_timer_cnt_get();
+                    // The hold-indicator writes the LED pins directly; stop the
+                    // USB animation first so the two cannot light LEDs at once.
+                    g_usb_led_marquee_enable = false;
+                    rgb_marquee_stop();
                 }
                 m_is_b_btn_press = true;
                 sleep_timer_stop();
@@ -315,12 +329,27 @@ static void timer_button_event_handle(void *arg) {
                     m_button_led_timer_running = true;
                 }
             }
+            if (entered_ble) {
+                // Light the current slot after the marquee teardown, otherwise
+                // the PWM uninit would immediately blank the pins again.
+                rgb_marquee_stop();
+                light_up_by_slot();
+            }
         }
         if (pin == BUTTON_2) {
+            bool entered_ble = false;
+            if (!m_is_a_btn_press && findmy_beacon_is_enabled() && findmy_beacon_is_active()) {
+                findmy_beacon_enter_ble_mode();
+                entered_ble = true;
+            }
             if (button_has_any_function('a')) {
                 if (!m_is_a_btn_press) {
                     NRF_LOG_INFO("BUTTON_A_PRESS");
                     m_last_btn_press = app_timer_cnt_get();
+                    // Same as button B: the hold indicator owns the LEDs while
+                    // the button is down.
+                    g_usb_led_marquee_enable = false;
+                    rgb_marquee_stop();
                 }
                 m_is_a_btn_press = true;
                 sleep_timer_stop();
@@ -328,6 +357,10 @@ static void timer_button_event_handle(void *arg) {
                     app_timer_start(m_button_led_timer, APP_TIMER_TICKS(100), NULL);
                     m_button_led_timer_running = true;
                 }
+            }
+            if (entered_ble) {
+                rgb_marquee_stop();
+                light_up_by_slot();
             }
         }
     }
@@ -576,6 +609,7 @@ static void system_off_enter(void) {
 /**
  *@brief :Detection of wake-up source
  */
+
 static void check_wakeup_src(void) {
     sd_power_reset_reason_get(&m_reset_source);
     sd_power_reset_reason_clr(m_reset_source);
@@ -620,6 +654,11 @@ static void check_wakeup_src(void) {
 
         // The indicator of the current card slot lights up at the end of the animation
         light_up_by_slot();
+
+        // Button activation with the AirTag switch on starts in BLE mode: the
+        // beacon yields the advertising set so the app can connect. The idle
+        // sleep timeout switches the device back to broadcasting.
+        findmy_beacon_enter_ble_mode();
 
         // If no operation follows, wait for the configured timeout and then deep hibernate
         sleep_timer_start(settings_get_sleep_timeout());
@@ -1619,7 +1658,7 @@ static void button_press_process(void) {
             m_is_b_btn_release = false;
             m_is_a_btn_extra_long_press = false;
             m_is_b_btn_extra_long_press = false;
-            return;
+                            return;
         }
         if (m_is_a_btn_release) {
             if (m_is_a_btn_extra_long_press) {
@@ -1719,6 +1758,7 @@ int main(void) {
     power_management_init();  // Power management initialization
     usb_cdc_init();           // USB cdc emulation initialization
     ble_slave_init();         // Bluetooth protocol stack initialization
+    findmy_beacon_init();     // Restore the FindMy beacon key/state and start advertising if enabled
 
     rng_drv_and_srand_init(); // Random number generator initialization
     bsp_timer_init();         // Initialize timeout timer

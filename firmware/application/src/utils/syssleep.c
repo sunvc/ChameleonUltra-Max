@@ -1,6 +1,7 @@
 #include "nrfx_power.h"
 #include "app_timer.h"
 #include "syssleep.h"
+#include "findmy_beacon.h"
 
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
@@ -13,6 +14,10 @@ static volatile bool m_system_off_enter = false;
 extern bool g_is_ble_connected; //Link to log in BLE
 extern bool g_is_tag_emulating; //The status of the logo emulation card
 extern volatile bool m_is_field_on; //NFC field generator state from app_main.c
+
+// Defined in rfid_main.c / rgb_marquee.c: blank the LEDs without touching state.
+void light_off_all(void);
+void rgb_marquee_stop(void);
 
 
 /** @brief Equipment sleep timer event
@@ -49,7 +54,9 @@ void sleep_timer_start(uint32_t time_ms) {
     sleep_timer_stop();
     // Non -USB power supply status
     if (nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED) {
-        // If Bluetooth is still connected, or is still in the state of emulation card, or field generator is on, you don't need to start sleep
+        // Bluetooth link, tag emulation and the NFC field block the timer
+        // entirely. The FindMy beacon does not: the timer is started so the
+        // idle handler can blank the LEDs while the device keeps broadcasting.
         if (g_is_ble_connected == false && g_is_tag_emulating == false && m_is_field_on == false) {
             // Start the timer
             ret_code_t err_code = app_timer_start(m_app_sleep_timer, APP_TIMER_TICKS(time_ms), NULL);
@@ -66,6 +73,14 @@ void sleep_system_run(void (*sysOffSleep)(), void (*sysOnSleep)()) {
     // No task to process, sleep enter
     if (m_system_off_enter) {
         m_system_off_enter = false;
+        if (findmy_beacon_is_enabled()) {
+            // The BLE wake window ended: switch from connectable advertising
+            // back to the FindMy broadcast, then blank the LEDs.
+            findmy_beacon_switch_to_broadcast();
+            rgb_marquee_stop();
+            light_off_all();
+            return;
+        }
         // Enter Sleep(System_OFF sleep mode) zzzzz.....
         sysOffSleep();
     } else {

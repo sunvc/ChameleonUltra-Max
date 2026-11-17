@@ -1,10 +1,15 @@
 #ifndef BLE_MAIN_H
 #define BLE_MAIN_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "ble_bas.h"
 #include "ble_gatts.h"
 #include "ble_nus.h"
 #include "nrfx_saadc.h"
+
+#define APP_FINDMY_BEACON_KEY_LEN 28
 
 extern uint16_t batt_lvl_in_milli_volts;
 extern uint8_t percentage_batt_lvl;
@@ -18,6 +23,15 @@ void delete_bonds_all(void);
 void nus_data_response(uint8_t *p_data, uint16_t length);
 bool is_nus_working(void);
 void set_ble_connect_key(uint8_t *key);
+
+// Apple Find My (offline finding) beacon advertising set.
+void ble_findmy_adv_update(const uint8_t key[APP_FINDMY_BEACON_KEY_LEN]);
+bool ble_findmy_set_address(const uint8_t key[APP_FINDMY_BEACON_KEY_LEN]);
+bool ble_findmy_restore_address(void);
+bool ble_findmy_advertising_start(void);
+void ble_findmy_advertising_stop(void);
+bool ble_findmy_is_advertising(void);
+bool ble_findmy_uses_two_sets(void);
 
 void register_lf_adc_callback(lf_adc_callback_t cb);
 void unregister_lf_adc_callback(void);

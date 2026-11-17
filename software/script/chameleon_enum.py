@@ -39,7 +39,7 @@ class Command(enum.IntEnum):
     DELETE_SLOT_SENSE_TYPE = 1024
 
     GET_BATTERY_INFO = 1025
-    GET_BATTERY_INFO_EX = 1041
+    GET_BATTERY_INFO_EX = 1043
 
     GET_BUTTON_PRESS_CONFIG = 1026
     SET_BUTTON_PRESS_CONFIG = 1027
@@ -60,9 +60,11 @@ class Command(enum.IntEnum):
 
     GET_SLEEP_TIMEOUT = 1039
     SET_SLEEP_TIMEOUT = 1040
-
     GET_LONG_PRESS_THRESHOLD = 1041
     SET_LONG_PRESS_THRESHOLD = 1042
+    GET_FINDMY_BEACON_CONFIG = 1053
+    SET_FINDMY_BEACON_CONFIG = 1054
+    GET_FINDMY_BEACON_STATUS = 1055
 
     HF14A_SCAN = 2000
     MF1_DETECT_SUPPORT = 2001
@@ -615,6 +617,11 @@ class ButtonPressFunction(enum.IntEnum):
     CLONE = 3
     BATTERY = 4
     FIELDGEN = 5
+    FULLCLONE = 6
+    SOFTREBOOT = 7
+    CYCLEGROUP = 8
+    TOGGLESLOTPOLLING = 9
+    TOGGLEFINDMY = 10
 
     def __str__(self):
         if self == ButtonPressFunction.NONE:
@@ -629,6 +636,16 @@ class ButtonPressFunction(enum.IntEnum):
             return "Show Battery Level"
         elif self == ButtonPressFunction.FIELDGEN:
             return "Toggle NFC Field Generator"
+        elif self == ButtonPressFunction.FULLCLONE:
+            return "Full clone card (offline)"
+        elif self == ButtonPressFunction.SOFTREBOOT:
+            return "Soft reboot"
+        elif self == ButtonPressFunction.CYCLEGROUP:
+            return "Switch card group"
+        elif self == ButtonPressFunction.TOGGLESLOTPOLLING:
+            return "Toggle slot polling"
+        elif self == ButtonPressFunction.TOGGLEFINDMY:
+            return "Toggle Find My beacon"
         return "None"
 
 

@@ -89,6 +89,23 @@ void light_up_by_slot(void) {
 }
 
 /**
+ * @brief Turn all indicator LEDs off without changing the emulation state.
+ *
+ * Used when the device stays awake for the FindMy beacon: the sleep timer
+ * still fires, but instead of hibernating it only blanks the lights.
+ */
+void light_off_all(void) {
+    uint32_t *led_pins = hw_get_led_array();
+    for (int i = 0; i < RGB_LIST_NUM; i++) {
+        nrf_gpio_pin_clear(led_pins[i]);
+    }
+    // RGB indicator pins are active low: set = off.
+    nrf_gpio_pin_set(LED_R);
+    nrf_gpio_pin_set(LED_G);
+    nrf_gpio_pin_set(LED_B);
+}
+
+/**
  * @brief Apply visual and state changes after switching slot
  */
 void apply_slot_change(uint8_t slot_now, uint8_t slot_new) {

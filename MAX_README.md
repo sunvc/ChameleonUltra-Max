@@ -72,6 +72,32 @@ clone feature.
 保存卡槽数据 + 设置后立即重启。新按键功能 `Soft reboot`，
 以及新命令 `DATA_CMD_RESET_DEVICE (1046)`。
 
+### 5. Apple Find My / OpenHaystack 信标 / Find My beacon
+
+让设备像 AirTag 一样出现在苹果「查找」网络中，**用于找回自己的设备**：
+
+* 按 [OpenHaystack](https://github.com/seemoo-lab/openhaystack) 的离线查找广播格式发送
+  31 字节非连接广播（`1e ff 4c 00 12 19 00 + 公钥`），随机地址也由公钥派生；
+* 公钥由 OpenHaystack macOS App 生成：添加 accessory → 右键 **Copy advertisement key**
+  （Base64），用配套 CLI 下发，例如
+  `chameleon_cli_main.py --port COMx hw settings findmy --key <Base64> --enable`；
+  不带参数执行 `hw settings findmy` 可查看当前开关、密钥与广播模式；
+* 开关与密钥保存在 flash，断电重启后自动恢复；可用按键功能 `Toggle Find My beacon`
+  在无电脑/手机时快速开关（绿色闪烁=开，红色闪烁=关）；
+* 开启后设备不会进入深度休眠（与 NFS 场发生器类似），以保持广播持续在线。
+
+**广播模式**：S140 7.2.0 官方规格只支持 1 个 advertising set，固件会在启动时尝试申请第 2 个
+（`GET_FINDMY_BEACON_STATUS` 的 mode 字段可查看）：
+
+* `two_set`：Find My 广播与 App 可连接广播**同时存在**，手机 App 仍可连接改设置；
+* `shared_set`：软设备拒绝双 set 时自动回退，信标开启期间 App 可连接广播暂停
+  （此时用按键或 USB 关闭信标即可恢复连接）。
+
+**限制（务必阅读）**：参考 OpenHaystack 固件使用**静态密钥/静态地址**，任何在附近的 BLE 扫描器
+都能发现并长期追踪该广播，请只给自己本人的财物使用；位置报告依赖附近有 Apple 设备转发，
+出现通常有 15–30 分钟延迟；iOS 的「未知追踪器」提醒策略可能随苹果更新变化。
+追踪他人设备在多数地区属违法行为。
+
 ---
 
 ## 上位机 / Companion app
@@ -99,6 +125,9 @@ clone feature.
 | `SET_EXTRA_LONG_BUTTON_PRESS_CONFIG` | 1050 | 写超长按动作：按键 + 动作 |
 | `GET_EXTRA_LONG_PRESS_THRESHOLD` | 1051 | 读超长按阈值（2 字节大端毫秒） |
 | `SET_EXTRA_LONG_PRESS_THRESHOLD` | 1052 | 写超长按阈值（2 字节大端毫秒） |
+| `GET_FINDMY_BEACON_CONFIG` | 1053 | 读 Find My 信标配置：1 字节开关 + 28 字节公钥 |
+| `SET_FINDMY_BEACON_CONFIG` | 1054 | 写配置：29 字节 `{enable, key}`、28 字节（只换 key）或 1 字节（只开关）；写 flash 并立即生效 |
+| `GET_FINDMY_BEACON_STATUS` | 1055 | 读运行状态：`{enabled, active, mode}`，mode 0=双 set 并存、1=共享 set 回退 |
 | `GET_DEVICE_AUTO_POLLING_DELAY` | 6040 | 读 2 字节大端：轮询间隔（毫秒） |
 | `SET_DEVICE_AUTO_POLLING_DELAY` | 6041 | 写 2 字节大端毫秒（内部按 10ms 量化，10..1000ms） |
 | `GET_IC_POLLING` / `SET_IC_POLLING` | 6046 / 6047 | HF/IC 是否参与轮询 |
@@ -160,9 +189,13 @@ clone feature.
 | 文件 | 改动 |
 |---|---|
 | `firmware/application/src/settings.h/.c` | 设置 v13：轮询/卡组/智能轮询字段 + 10ms 间隔单位 + A/B 超长按动作与阈值 + 迁移 |
-| `firmware/application/src/data_cmd.h` | 5 个新命令号 |
+| `firmware/application/src/data_cmd.h` | 10 个新命令号（含 Find My 1053–1055） |
 | `firmware/application/src/app_cmd.c` | 新命令处理器 + settings blob 扩展 |
 | `firmware/application/src/app_main.c` | 新按键功能、轮询状态机、卡组切换、克隆入口与 LED |
 | `firmware/application/src/rfid/reader/hf/mf1_offline_clone.c/.h` | 全新：离线整卡克隆模块 + 内置字典 |
+| `firmware/application/src/findmy_beacon.c/.h` | 全新：Find My 信标配置持久化（FDS 0x1400）+ 启停/休眠守卫/LED 反馈 |
+| `firmware/application/src/ble_main.c` | 第二个 advertising set（Find My，失败自动回退单 set）、密钥派生随机地址、断连重试 |
+| `firmware/application/src/utils/syssleep.c` | 信标开启时不进入深度休眠 |
+| `software/script/` | `chameleon_enum/chameleon_cmd/chameleon_cli_unit` 增加 `hw settings findmy` |
 | `firmware/application/Makefile` | 新增源文件 |
 | `firmware/Makefile.defs` | 无 tag 仓库的版本号兜底 |
