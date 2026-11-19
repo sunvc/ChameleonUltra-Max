@@ -683,6 +683,9 @@ void nfc_tag_14a_event_callback(nrfx_nfct_evt_t const *p_event) {
 
             set_slot_light_color(RGB_GREEN);
             TAG_FIELD_LED_ON()
+            // FindMy/连接状态可能主动关闭过卡槽 LED；真实 NFC 场出现时
+            // 必须重新打开当前卡槽的使能脚，否则卡模拟正常但灯不亮。
+            light_up_by_slot();
 
             NRF_LOG_INFO("HF FIELD DETECTED");
 

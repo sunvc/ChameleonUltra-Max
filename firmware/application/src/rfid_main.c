@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "app_timer.h"
 #include "rfid_main.h"
 #include "rgb_marquee.h"
 
@@ -7,7 +8,16 @@ device_mode_t rfid_state = DEVICE_MODE_NONE;
 
 // External declaration for field state
 extern bool m_is_field_on;
-volatile bool g_field_indicator_manual_on = false;
+extern bool g_usb_led_marquee_enable;
+APP_TIMER_DEF(m_light_idle_timer);
+static bool m_light_idle_timer_ready = false;
+
+static void light_idle_timeout(void *arg) {
+    (void)arg;
+    g_usb_led_marquee_enable = false;
+    rgb_marquee_stop();
+    light_down_all();
+}
 
 /**
  * @brief Function for enter tag reader mode
@@ -102,29 +112,26 @@ void light_down_all(void) {
     TAG_FIELD_LED_OFF();
 }
 
-void field_indicator_manual_set(bool enable) {
-    g_field_indicator_manual_on = enable;
-    if (enable) {
-        nrf_gpio_pin_clear(LED_FIELD);
-    } else {
-        nrf_gpio_pin_set(LED_FIELD);
+void light_idle_timer_init(void) {
+    if (m_light_idle_timer_ready) {
+        return;
     }
+    ret_code_t err = app_timer_create(&m_light_idle_timer, APP_TIMER_MODE_SINGLE_SHOT, light_idle_timeout);
+    m_light_idle_timer_ready = (err == NRF_SUCCESS);
 }
 
-bool field_indicator_manual_is_on(void) {
-    return g_field_indicator_manual_on;
+void light_idle_timer_start(uint32_t ms) {
+    if (!m_light_idle_timer_ready) {
+        return;
+    }
+    app_timer_stop(m_light_idle_timer);
+    app_timer_start(m_light_idle_timer, APP_TIMER_TICKS(ms), NULL);
 }
 
-void field_indicator_on(void) {
-    bool was_manual = g_field_indicator_manual_on;
-    g_field_indicator_manual_on = false;
-    nrf_gpio_pin_clear(LED_FIELD);
-    if (was_manual) {
-        set_slot_light_color(get_color_by_slot(tag_emulation_get_slot()));
+void light_idle_timer_stop(void) {
+    if (m_light_idle_timer_ready) {
+        app_timer_stop(m_light_idle_timer);
     }
-    // A real RF field always restores the active slot indicator. Manual light
-    // mode may previously have cleared all slot LED enable pins.
-    light_up_by_slot();
 }
 
 /**

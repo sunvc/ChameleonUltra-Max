@@ -3,6 +3,7 @@
 #include "syssleep.h"
 #include "findmy_beacon.h"
 #include "rfid_main.h"
+#include "settings.h"
 
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
@@ -40,6 +41,7 @@ void sleep_timer_init(void) {
  */
 void sleep_timer_stop() {
     m_system_off_enter = false;
+    light_idle_timer_stop();
     ret_code_t err_code = app_timer_stop(m_app_sleep_timer);
     APP_ERROR_CHECK(err_code);
 }
@@ -53,11 +55,17 @@ void sleep_timer_start(uint32_t time_ms) {
     if (nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED) {
         // If Bluetooth is still connected, or is still in the state of emulation card,
         // or field generator is on, or the FindMy beacon is enabled, you don't need to start sleep
-        if (g_is_ble_connected == false && g_is_tag_emulating == false && m_is_field_on == false &&
-                field_indicator_manual_is_on() == false && findmy_beacon_should_stay_awake() == false) {
-            // Start the timer
-            ret_code_t err_code = app_timer_start(m_app_sleep_timer, APP_TIMER_TICKS(time_ms), NULL);
-            APP_ERROR_CHECK(err_code);
+        if (g_is_ble_connected == false && g_is_tag_emulating == false && m_is_field_on == false) {
+            if (findmy_beacon_should_stay_awake()) {
+                // FindMy cannot enter System OFF, but its LEDs should still
+                // follow the user configured wake/sleep timeout.
+                uint32_t configured_ms = settings_get_sleep_timeout();
+                light_idle_timer_start(configured_ms > 0 ? configured_ms : time_ms);
+            } else {
+                // Start the timer
+                ret_code_t err_code = app_timer_start(m_app_sleep_timer, APP_TIMER_TICKS(time_ms), NULL);
+                APP_ERROR_CHECK(err_code);
+            }
         }
     }
 }

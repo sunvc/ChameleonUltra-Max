@@ -53,6 +53,7 @@ NRF_LOG_MODULE_REGISTER();
 APP_TIMER_DEF(m_button_check_timer); // Timer for button debounce
 APP_TIMER_DEF(m_slot_polling_timer); // Timer for slot auto-polling tick
 APP_TIMER_DEF(m_button_led_timer);  // Timer for the hold-to-count LED display
+APP_TIMER_DEF(m_activation_clear_timer);
 #define BATTERY_STATUS_DISPLAY_DURATION_MS  5000U
 #define SLOT_POLLING_TICK_MS                10U
 
@@ -69,6 +70,17 @@ static bool m_is_a_btn_press = false;
 
 static bool m_is_b_btn_release = false;
 static bool m_is_a_btn_release = false;
+static bool m_activation_press = false;
+
+static void activation_clear_timeout(void *arg) {
+    (void)arg;
+    m_activation_press = false;
+}
+
+static void arm_activation_clear_timer(void) {
+    app_timer_stop(m_activation_clear_timer);
+    app_timer_start(m_activation_clear_timer, APP_TIMER_TICKS(1500), NULL);
+}
 
 static bool m_system_off_processing = false;
 static bool m_battery_status_display_active = false;
@@ -250,9 +262,6 @@ static void button_led_timer_handler(void *arg) {
     if (!m_is_a_btn_press && !m_is_b_btn_press) {
         return;
     }
-    if (field_indicator_manual_is_on()) {
-        return;
-    }
     if (m_is_field_on || m_battery_status_display_active) {
         return;
     }
@@ -304,11 +313,19 @@ static void timer_button_event_handle(void *arg) {
     if (nrf_gpio_pin_read(pin) == 1) {
         const bool first_press = (pin == BUTTON_1 && !m_is_b_btn_press) ||
                                  (pin == BUTTON_2 && !m_is_a_btn_press);
-        if (first_press && findmy_beacon_is_enabled()) {
+        if (first_press && findmy_beacon_is_enabled() && !is_nus_working()) {
             // AirTag mode uses a non-connectable advertisement by default.
-            // Any button press opens the normal connectable window for the
-            // same duration used by the normal wake timeout.
+            // A press in the inactive state opens the normal connectable
+            // window and only activates the device. Once that window is
+            // active (or the app is connected), later presses run the
+            // configured button action. Every operation refreshes the
+            // connectable window so the wake timeout follows actual use.
+            const bool was_active = findmy_beacon_connectable_window_active();
             findmy_beacon_start_connectable_window(settings_get_sleep_timeout());
+            if (!was_active && findmy_beacon_connectable_window_active()) {
+                m_activation_press = true;
+                arm_activation_clear_timer();
+            }
         }
         if (pin == BUTTON_1) {
             // If button is disabled, we can't dispatch key event.
@@ -392,7 +409,7 @@ static void timer_button_event_handle(void *arg) {
     if (!m_is_a_btn_press && !m_is_b_btn_press && m_button_led_timer_running) {
         app_timer_stop(m_button_led_timer);
         m_button_led_timer_running = false;
-        if (!m_is_field_on && !field_indicator_manual_is_on()) {
+        if (!m_is_field_on) {
             rgb_marquee_stop();
             light_up_by_slot();
         }
@@ -414,6 +431,9 @@ static void button_init(void) {
     APP_ERROR_CHECK(err_code);
 
     err_code = app_timer_create(&m_button_led_timer, APP_TIMER_MODE_REPEATED, button_led_timer_handler);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = app_timer_create(&m_activation_clear_timer, APP_TIMER_MODE_SINGLE_SHOT, activation_clear_timeout);
     APP_ERROR_CHECK(err_code);
 
     // Configure SENSE mode, select false for sense configuration
@@ -614,6 +634,28 @@ static void check_wakeup_src(void) {
 
     if (m_reset_source & NRF_POWER_RESETREAS_OFF_MASK) {
         NRF_LOG_INFO("WakeUp from button");
+        // The press that boots the device is an activation press. Its short
+        // release must not also execute the configured button action.
+        // button_init() runs before this function, but the GPIO event that
+        // woke the MCU happened before the GPIO handler was enabled. Restore
+        // the held-button state so the first release can be observed and the
+        // activation press is consumed exactly once.
+        if (nrf_gpio_pin_read(BUTTON_1) == 1) {
+            m_is_b_btn_press = true;
+            m_last_btn_press = app_timer_cnt_get();
+            m_activation_press = true;
+            arm_activation_clear_timer();
+        } else if (nrf_gpio_pin_read(BUTTON_2) == 1) {
+            m_is_a_btn_press = true;
+            m_last_btn_press = app_timer_cnt_get();
+            m_activation_press = true;
+            arm_activation_clear_timer();
+        } else {
+            // The wake click already ended before the application started.
+            // Do not swallow the next deliberate press.
+            m_activation_press = false;
+            app_timer_stop(m_activation_clear_timer);
+        }
         advertising_start(false); // Turn on Bluetooth radio
 
         // Button wake-up boot animation
@@ -1118,22 +1160,6 @@ static void btn_fn_soft_reboot(void) {
     NVIC_SystemReset();
 }
 
-static void btn_fn_toggle_field_light(void) {
-    g_usb_led_marquee_enable = false;
-    if (!field_indicator_manual_is_on()) {
-        rgb_marquee_stop();
-        light_down_all();
-        field_indicator_manual_set(true);
-        sleep_timer_stop();
-    } else {
-        field_indicator_manual_set(false);
-        light_down_all();
-        set_slot_light_color(get_color_by_slot(tag_emulation_get_slot()));
-        light_up_by_slot();
-        sleep_timer_start(SLEEP_DELAY_MS_BUTTON_CLICK);
-    }
-}
-
 /**@brief Slot auto-polling timer tick (timer context, only set a flag)
  */
 static void slot_polling_timer_handler(void *arg) {
@@ -1617,10 +1643,6 @@ static void run_button_function_by_settings(settings_button_function_t sbf) {
             break;
         }
 
-        case SettingsButtonToggleFieldLight:
-            btn_fn_toggle_field_light();
-            break;
-
         default:
             NRF_LOG_ERROR("Unsupported button function");
             break;
@@ -1654,27 +1676,45 @@ static void button_press_process(void) {
             return;
         }
         if (m_is_a_btn_release) {
+            const bool activation_only = m_activation_press &&
+                !m_is_a_btn_long_press && !m_is_a_btn_extra_long_press;
+            if (activation_only) {
+                set_slot_light_color(get_color_by_slot(tag_emulation_get_slot()));
+                light_up_by_slot();
+            }
             if (m_is_a_btn_extra_long_press) {
                 run_button_function_guarded(settings_get_extra_long_button_press_config('a'));
-            } else if (!m_is_a_btn_long_press) {
+            } else if (!m_is_a_btn_long_press && !activation_only) {
                 run_button_function_guarded(settings_get_button_press_config('a'));
             } else {
-                run_button_function_guarded(settings_get_long_button_press_config('a'));
+                if (m_is_a_btn_long_press) {
+                    run_button_function_guarded(settings_get_long_button_press_config('a'));
+                }
             }
             m_is_a_btn_release = false;
             m_is_a_btn_extra_long_press = false;
         }
         if (m_is_b_btn_release) {
+            const bool activation_only = m_activation_press &&
+                !m_is_b_btn_long_press && !m_is_b_btn_extra_long_press;
+            if (activation_only) {
+                set_slot_light_color(get_color_by_slot(tag_emulation_get_slot()));
+                light_up_by_slot();
+            }
             if (m_is_b_btn_extra_long_press) {
                 run_button_function_guarded(settings_get_extra_long_button_press_config('b'));
-            } else if (!m_is_b_btn_long_press) {
+            } else if (!m_is_b_btn_long_press && !activation_only) {
                 run_button_function_guarded(settings_get_button_press_config('b'));
             } else {
-                run_button_function_guarded(settings_get_long_button_press_config('b'));
+                if (m_is_b_btn_long_press) {
+                    run_button_function_guarded(settings_get_long_button_press_config('b'));
+                }
             }
             m_is_b_btn_release = false;
             m_is_b_btn_extra_long_press = false;
         }
+        m_activation_press = false;
+        app_timer_stop(m_activation_clear_timer);
         // Disable led marquee for usb at button pressed.
         g_usb_led_marquee_enable = false;
         // Re-delay into hibernation (unless field is on)
@@ -1693,7 +1733,7 @@ static void blink_usb_led_status(void) {
     if (nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED) {
         if (is_working) {
             rgb_marquee_stop();
-            if (!findmy_beacon_is_enabled() && !field_indicator_manual_is_on()) {
+            if (!findmy_beacon_is_enabled()) {
                 set_slot_light_color(color);
                 light_up_by_slot();
             }
@@ -1717,7 +1757,7 @@ static void blink_usb_led_status(void) {
             if (is_working) {
                 is_working = false;
                 rgb_marquee_stop();
-                if (!findmy_beacon_is_enabled() && !field_indicator_manual_is_on()) {
+                if (!findmy_beacon_is_enabled()) {
                     set_slot_light_color(color);
                     light_up_by_slot();
                 }
@@ -1762,6 +1802,7 @@ int main(void) {
     bsp_timer_start();        // Start BSP TIMER and prepare it for processing business logic
     button_init();            // Button initialization for handling business logic
     sleep_timer_init();       // Soft timer initialization for hibernation
+    light_idle_timer_init();  // LED timeout while FindMy keeps the device awake
     tag_emulation_init();     // Analog card initialization
     nfc_tag_14a_set_reader_event_cb(slot_reader_event);
     rgb_marquee_init();       // Light effect initialization
