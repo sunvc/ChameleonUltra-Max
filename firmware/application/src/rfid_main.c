@@ -115,6 +115,18 @@ bool field_indicator_manual_is_on(void) {
     return g_field_indicator_manual_on;
 }
 
+void field_indicator_on(void) {
+    bool was_manual = g_field_indicator_manual_on;
+    g_field_indicator_manual_on = false;
+    nrf_gpio_pin_clear(LED_FIELD);
+    if (was_manual) {
+        set_slot_light_color(get_color_by_slot(tag_emulation_get_slot()));
+    }
+    // A real RF field always restores the active slot indicator. Manual light
+    // mode may previously have cleared all slot LED enable pins.
+    light_up_by_slot();
+}
+
 /**
  * @brief Apply visual and state changes after switching slot
  */
