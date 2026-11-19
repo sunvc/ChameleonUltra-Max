@@ -17,7 +17,7 @@ static uint16_t m_config_crc;
 static bool m_ble_pairing_enable_first_load_value;
 
 static uint8_t settings_sanitize_button_action(uint8_t value) {
-    return value <= SettingsButtonToggleWhiteLight ? value : SettingsButtonDisable;
+    return value <= SettingsButtonToggleFieldLight ? value : SettingsButtonDisable;
 }
 
 static void update_config_crc(void) {

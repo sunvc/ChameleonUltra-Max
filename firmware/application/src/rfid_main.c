@@ -7,6 +7,7 @@ device_mode_t rfid_state = DEVICE_MODE_NONE;
 
 // External declaration for field state
 extern bool m_is_field_on;
+volatile bool g_field_indicator_manual_on = false;
 
 /**
  * @brief Function for enter tag reader mode
@@ -99,6 +100,19 @@ void light_down_all(void) {
         nrf_gpio_pin_set(rgb_pins[i]);
     }
     TAG_FIELD_LED_OFF();
+}
+
+void field_indicator_manual_set(bool enable) {
+    g_field_indicator_manual_on = enable;
+    if (enable) {
+        nrf_gpio_pin_clear(LED_FIELD);
+    } else {
+        nrf_gpio_pin_set(LED_FIELD);
+    }
+}
+
+bool field_indicator_manual_is_on(void) {
+    return g_field_indicator_manual_on;
 }
 
 /**

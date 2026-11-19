@@ -7,8 +7,6 @@
 
 void rgb_marquee_init(void);
 void rgb_marquee_stop(void);
-void rgb_marquee_white_light_set(bool enable);
-bool rgb_marquee_white_light_is_on(void);
 void rgb_marquee_reset(void);
 bool rgb_marquee_is_enabled(void);
 void rgb_marquee_usb_open_sweep(uint8_t color, uint8_t dir);

@@ -28,6 +28,8 @@ typedef enum {
 void init_leds(void);
 void light_up_by_slot(void);
 void light_down_all(void);
+void field_indicator_manual_set(bool enable);
+bool field_indicator_manual_is_on(void);
 void apply_slot_change(uint8_t slot_now, uint8_t slot_new);
 void reader_mode_enter(void);
 void tag_mode_enter(void);

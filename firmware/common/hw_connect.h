@@ -96,8 +96,10 @@ extern uint32_t g_reader_power;
 
 
 // Operational Definitions for General Field Lights
-#define TAG_FIELD_LED_ON()     nrf_gpio_pin_clear(LED_FIELD);
-#define TAG_FIELD_LED_OFF()    nrf_gpio_pin_set(LED_FIELD);
+#define TAG_FIELD_LED_ON()     do { g_field_indicator_manual_on = false; nrf_gpio_pin_clear(LED_FIELD); } while (0);
+#define TAG_FIELD_LED_OFF()    do { if (!g_field_indicator_manual_on) { nrf_gpio_pin_set(LED_FIELD); } } while (0);
+
+extern volatile bool g_field_indicator_manual_on;
 
 
 void hw_connect_init(void);

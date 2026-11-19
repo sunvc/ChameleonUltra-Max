@@ -239,9 +239,6 @@ bool findmy_beacon_connectable_window_active(void) {
 }
 
 void findmy_beacon_clear_indicator_leds(void) {
-    if (rgb_marquee_white_light_is_on()) {
-        return;
-    }
     g_usb_led_marquee_enable = false;
     rgb_marquee_stop();
     light_down_all();

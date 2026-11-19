@@ -250,7 +250,7 @@ static void button_led_timer_handler(void *arg) {
     if (!m_is_a_btn_press && !m_is_b_btn_press) {
         return;
     }
-    if (rgb_marquee_white_light_is_on()) {
+    if (field_indicator_manual_is_on()) {
         return;
     }
     if (m_is_field_on || m_battery_status_display_active) {
@@ -392,7 +392,7 @@ static void timer_button_event_handle(void *arg) {
     if (!m_is_a_btn_press && !m_is_b_btn_press && m_button_led_timer_running) {
         app_timer_stop(m_button_led_timer);
         m_button_led_timer_running = false;
-        if (!m_is_field_on && !rgb_marquee_white_light_is_on()) {
+        if (!m_is_field_on && !field_indicator_manual_is_on()) {
             rgb_marquee_stop();
             light_up_by_slot();
         }
@@ -1118,13 +1118,15 @@ static void btn_fn_soft_reboot(void) {
     NVIC_SystemReset();
 }
 
-static void btn_fn_toggle_white_light(void) {
+static void btn_fn_toggle_field_light(void) {
     g_usb_led_marquee_enable = false;
-    if (!rgb_marquee_white_light_is_on()) {
-        rgb_marquee_white_light_set(true);
+    if (!field_indicator_manual_is_on()) {
+        rgb_marquee_stop();
+        light_down_all();
+        field_indicator_manual_set(true);
         sleep_timer_stop();
     } else {
-        rgb_marquee_white_light_set(false);
+        field_indicator_manual_set(false);
         light_down_all();
         set_slot_light_color(get_color_by_slot(tag_emulation_get_slot()));
         light_up_by_slot();
@@ -1615,8 +1617,8 @@ static void run_button_function_by_settings(settings_button_function_t sbf) {
             break;
         }
 
-        case SettingsButtonToggleWhiteLight:
-            btn_fn_toggle_white_light();
+        case SettingsButtonToggleFieldLight:
+            btn_fn_toggle_field_light();
             break;
 
         default:
@@ -1691,7 +1693,7 @@ static void blink_usb_led_status(void) {
     if (nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED) {
         if (is_working) {
             rgb_marquee_stop();
-            if (!findmy_beacon_is_enabled() && !rgb_marquee_white_light_is_on()) {
+            if (!findmy_beacon_is_enabled() && !field_indicator_manual_is_on()) {
                 set_slot_light_color(color);
                 light_up_by_slot();
             }
@@ -1715,7 +1717,7 @@ static void blink_usb_led_status(void) {
             if (is_working) {
                 is_working = false;
                 rgb_marquee_stop();
-                if (!findmy_beacon_is_enabled() && !rgb_marquee_white_light_is_on()) {
+                if (!findmy_beacon_is_enabled() && !field_indicator_manual_is_on()) {
                     set_slot_light_color(color);
                     light_up_by_slot();
                 }

@@ -57,8 +57,8 @@ typedef enum {
     SettingsButtonCycleGroup = 8U,
     // Toggle slot auto-polling on/off
     SettingsButtonToggleSlotPolling = 9U,
-    // Toggle the low-brightness white illumination mode
-    SettingsButtonToggleWhiteLight = 10U,
+    // Toggle the dedicated RF field indicator as a manual light
+    SettingsButtonToggleFieldLight = 10U,
 } settings_button_function_t;
 
 typedef struct ALIGN_U32 {

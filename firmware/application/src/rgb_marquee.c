@@ -15,7 +15,6 @@ NRF_LOG_MODULE_REGISTER();
 
 #define PWM_MAX 1000 // PWM Maximum
 #define LIGHT_LEVEL_MAX 99 // The maximum value of brightness level
-#define WHITE_LIGHT_LEVEL 55 // Keep all eight LEDs within a safe current budget.
 static nrf_drv_pwm_t pwm0_ins = NRF_DRV_PWM_INSTANCE(1);
 nrf_pwm_values_individual_t pwm_sequ_val; // PWM control 4 channels in the independent mode
 nrf_pwm_sequence_t const seq = { //Configure the structure of PWM output
@@ -36,63 +35,18 @@ static autotimer *timer;
 static uint8_t rgb_marquee_usb_idle_step = 0;
 static uint8_t rgb_marquee_usb_idle_color = RGB_RED;
 static uint8_t rgb_marquee_usb_open_step = 0;
-static bool m_white_light_on = false;
 extern bool g_usb_led_marquee_enable;
-
-uint16_t get_pwmduty(uint8_t light_level);
 
 
 void rgb_marquee_init(void) {
     timer = bsp_obtain_timer(0);
 }
 
-static void rgb_marquee_hw_stop(void) {
+void rgb_marquee_stop(void) {
     nrfx_pwm_stop(&pwm0_ins, true);
     nrfx_pwm_uninit(&pwm0_ins);//turn off pwm output
     rgb_marquee_usb_idle_step = 0;
     rgb_marquee_usb_open_step = 0;
-    m_white_light_on = false;
-}
-
-void rgb_marquee_stop(void) {
-    // The button-release path stops animations before dispatching the button
-    // action. Do not let that erase the active white-light state, otherwise
-    // the next press always sees "off" and turns it on again forever.
-    if (m_white_light_on) {
-        return;
-    }
-    rgb_marquee_hw_stop();
-}
-
-bool rgb_marquee_white_light_is_on(void) {
-    return m_white_light_on;
-}
-
-void rgb_marquee_white_light_set(bool enable) {
-    rgb_marquee_hw_stop();
-    if (!enable) {
-        return;
-    }
-
-    uint32_t *led_pins = hw_get_led_array();
-    for (uint8_t i = 0; i < RGB_LIST_NUM; i++) {
-        nrf_gpio_pin_set(led_pins[i]);
-    }
-
-    // Drive the shared RGB channels with PWM instead of full-on GPIO. Eight
-    // white LEDs at full brightness can brown out the device; level 55 keeps
-    // the current within a safe range while remaining visibly white.
-    pwm_config.output_pins[0] = LED_R;
-    pwm_config.output_pins[1] = LED_G;
-    pwm_config.output_pins[2] = LED_B;
-    pwm_config.output_pins[3] = NRF_DRV_PWM_PIN_NOT_USED;
-    pwm_sequ_val.channel_0 = get_pwmduty(WHITE_LIGHT_LEVEL);
-    pwm_sequ_val.channel_1 = get_pwmduty(WHITE_LIGHT_LEVEL);
-    pwm_sequ_val.channel_2 = get_pwmduty(WHITE_LIGHT_LEVEL);
-    pwm_sequ_val.channel_3 = 0;
-    nrf_drv_pwm_init(&pwm0_ins, &pwm_config, NULL);
-    nrf_drv_pwm_simple_playback(&pwm0_ins, &seq, 1, NRF_DRV_PWM_FLAG_LOOP);
-    m_white_light_on = true;
 }
 
 // reset RGB state machines to force a refresh of the LED color
