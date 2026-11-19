@@ -16,6 +16,10 @@ static settings_data_t config;
 static uint16_t m_config_crc;
 static bool m_ble_pairing_enable_first_load_value;
 
+static uint8_t settings_sanitize_button_action(uint8_t value) {
+    return value <= SettingsButtonToggleSlotPolling ? value : SettingsButtonDisable;
+}
+
 static void update_config_crc(void) {
     calc_14a_crc_lut((uint8_t *)&config, sizeof(config), (uint8_t *)&m_config_crc);
 }
@@ -66,8 +70,8 @@ void settings_init_long_press_threshold_config(void) {
 // add on version8
 // add on version13
 void settings_init_extra_long_press_config(void) {
-    config.button_a_extra_long_press = SettingsButtonDisable;
-    config.button_b_extra_long_press = SettingsButtonDisable;
+    config.button_a_extra_long_press = SettingsButtonFullClone;
+    config.button_b_extra_long_press = SettingsButtonToggleSlotPolling;
     config.extra_long_press_threshold = SETTINGS_EXTRA_LONG_PRESS_THRESHOLD_DEFAULT_MS;
 }
 
@@ -218,6 +222,12 @@ void settings_load_config(void) {
         NRF_LOG_INFO("Config version (%d) is not latest, performing migration to %d", config.version, SETTINGS_CURRENT_VERSION);
         settings_migrate();
     }
+    config.button_a_press = settings_sanitize_button_action(config.button_a_press);
+    config.button_b_press = settings_sanitize_button_action(config.button_b_press);
+    config.button_a_long_press = settings_sanitize_button_action(config.button_a_long_press);
+    config.button_b_long_press = settings_sanitize_button_action(config.button_b_long_press);
+    config.button_a_extra_long_press = settings_sanitize_button_action(config.button_a_extra_long_press);
+    config.button_b_extra_long_press = settings_sanitize_button_action(config.button_b_extra_long_press);
     if (config_did_change()) {
         settings_save_config();
     }
@@ -329,6 +339,7 @@ uint8_t settings_get_long_button_press_config(char which) {
  * @param value @link{ settings_button_function_t }
  */
 void settings_set_button_press_config(char which, uint8_t value) {
+    value = settings_sanitize_button_action(value);
     switch (which) {
         case 'a':
         case 'A':
@@ -354,6 +365,7 @@ void settings_set_button_press_config(char which, uint8_t value) {
  * @param value @link{ settings_button_function_t }
  */
 void settings_set_long_button_press_config(char which, uint8_t value) {
+    value = settings_sanitize_button_action(value);
     switch (which) {
         case 'a':
         case 'A':
@@ -433,6 +445,7 @@ uint8_t settings_get_extra_long_button_press_config(char which) {
 }
 
 void settings_set_extra_long_button_press_config(char which, uint8_t value) {
+    value = settings_sanitize_button_action(value);
     switch (which) {
         case 'a':
         case 'A':

@@ -495,8 +495,8 @@ static data_frame_tx_t *cmd_processor_set_button_press_config(uint16_t cmd, uint
     }
     settings_set_button_press_config(data[0], data[1]);
     // Persist to flash immediately so a power cycle keeps this setting.
-    settings_save_config();
-    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+    uint8_t save_status = settings_save_config();
+    return data_frame_make(cmd, save_status, 0, NULL);
 }
 
 static data_frame_tx_t *cmd_processor_get_long_button_press_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -513,8 +513,8 @@ static data_frame_tx_t *cmd_processor_set_long_button_press_config(uint16_t cmd,
     }
     settings_set_long_button_press_config(data[0], data[1]);
     // Persist to flash immediately so a power cycle keeps this setting.
-    settings_save_config();
-    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+    uint8_t save_status = settings_save_config();
+    return data_frame_make(cmd, save_status, 0, NULL);
 }
 
 static data_frame_tx_t *cmd_processor_get_extra_long_button_press_config(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -531,8 +531,8 @@ static data_frame_tx_t *cmd_processor_set_extra_long_button_press_config(uint16_
     }
     settings_set_extra_long_button_press_config(data[0], data[1]);
     // Persist to flash immediately so a power cycle keeps this setting.
-    settings_save_config();
-    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
+    uint8_t save_status = settings_save_config();
+    return data_frame_make(cmd, save_status, 0, NULL);
 }
 
 static data_frame_tx_t *cmd_processor_get_extra_long_press_threshold(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {

@@ -299,6 +299,14 @@ static void timer_button_event_handle(void *arg) {
 
     // Check here if the current GPIO is at the pressed level
     if (nrf_gpio_pin_read(pin) == 1) {
+        const bool first_press = (pin == BUTTON_1 && !m_is_b_btn_press) ||
+                                 (pin == BUTTON_2 && !m_is_a_btn_press);
+        if (first_press && findmy_beacon_is_enabled()) {
+            // AirTag mode uses a non-connectable advertisement by default.
+            // Any button press opens the normal connectable window for the
+            // same duration used by the normal wake timeout.
+            findmy_beacon_start_connectable_window(settings_get_sleep_timeout());
+        }
         if (pin == BUTTON_1) {
             // If button is disabled, we can't dispatch key event.
             if (button_has_any_function('b')) {
@@ -1590,22 +1598,6 @@ static void run_button_function_by_settings(settings_button_function_t sbf) {
             break;
         }
 
-        case SettingsButtonToggleFindMyBeacon: {
-            bool enable = !findmy_beacon_is_enabled();
-            if (!enable || findmy_beacon_has_key()) {
-                findmy_beacon_set_led_feedback(true);
-                bool ok = findmy_beacon_set_enable(enable);
-                findmy_beacon_set_led_feedback(false);
-                if (!ok) {
-                    offline_status_error();
-                }
-            } else {
-                // No key provisioned yet; blink red and keep the beacon off.
-                offline_status_error();
-            }
-            break;
-        }
-
         default:
             NRF_LOG_ERROR("Unsupported button function");
             break;
@@ -1678,8 +1670,10 @@ static void blink_usb_led_status(void) {
     if (nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED) {
         if (is_working) {
             rgb_marquee_stop();
-            set_slot_light_color(color);
-            light_up_by_slot();
+            if (!findmy_beacon_is_enabled()) {
+                set_slot_light_color(color);
+                light_up_by_slot();
+            }
             is_working = false;
         }
     } else {
@@ -1700,8 +1694,10 @@ static void blink_usb_led_status(void) {
             if (is_working) {
                 is_working = false;
                 rgb_marquee_stop();
-                set_slot_light_color(color);
-                light_up_by_slot();
+                if (!findmy_beacon_is_enabled()) {
+                    set_slot_light_color(color);
+                    light_up_by_slot();
+                }
             }
         }
     }

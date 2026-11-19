@@ -32,6 +32,7 @@ bool ble_findmy_advertising_start(void);
 void ble_findmy_advertising_stop(void);
 bool ble_findmy_is_advertising(void);
 bool ble_findmy_uses_two_sets(void);
+bool ble_findmy_enter_connectable_mode(void);
 
 void register_lf_adc_callback(lf_adc_callback_t cb);
 void unregister_lf_adc_callback(void);

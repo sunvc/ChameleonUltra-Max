@@ -54,6 +54,12 @@ void findmy_beacon_on_ble_disconnected(void);
 // BLE disconnect path, where the connectable advertisement used to restart.
 void findmy_beacon_start_if_enabled(void);
 
+// Temporarily pause FindMy and expose the normal connectable advertisement.
+// Used by a button press while AirTag mode is active.
+void findmy_beacon_start_connectable_window(uint32_t duration_ms);
+bool findmy_beacon_connectable_window_active(void);
+void findmy_beacon_clear_indicator_leds(void);
+
 // Keep-awake guard used by utils/syssleep.c: the beacon must survive deep
 // sleep decisions just like an active NFC field or BLE connection.
 bool findmy_beacon_should_stay_awake(void);

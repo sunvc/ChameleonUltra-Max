@@ -25,6 +25,7 @@
 #include "findmy_beacon.h"
 #include "dataframe.h"
 #include "hw_connect.h"
+#include "rfid_main.h"
 #include "settings.h"
 
 #define NRF_LOG_MODULE_NAME ble_main
@@ -470,6 +471,9 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context) {
             err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
             APP_ERROR_CHECK(err_code);
             g_is_ble_connected = true;
+            // The active advertising set is consumed by the connection. It is
+            // restarted from the disconnect handler when needed.
+            m_findmy_adv_active = false;
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
@@ -477,6 +481,11 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context) {
             // LED indication will be changed when advertising starts.
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
             g_is_ble_connected = false;
+            if (findmy_beacon_is_enabled()) {
+                // FindMy keeps the CPU awake for continuous broadcasting, but
+                // the slot LED should not stay lit after the host disconnects.
+                findmy_beacon_clear_indicator_leds();
+            }
             // A pending FindMy address update could not be applied while the
             // link was up; retry it now that no identity address is bound.
             findmy_beacon_on_ble_disconnected();
@@ -485,11 +494,12 @@ static void ble_evt_handler(ble_evt_t const *p_ble_evt, void *p_context) {
             // cancels the sleep timer (it does not restart advertising), so the host
             // cannot reconnect until the device sleeps and is woken again.
             if (findmy_beacon_is_enabled()) {
-                // The beacon owns the identity address; in shared-set mode this
-                // restarts the FindMy advertisement instead of the connectable
-                // one (advertising_start() ignores app restarts while shared).
-                // It is non-connectable, so no directed retry either.
                 findmy_beacon_start_if_enabled();
+                if (findmy_beacon_connectable_window_active()) {
+                    // The button wake window is still valid; keep the normal
+                    // connectable advertisement alive until its timer expires.
+                    advertising_start(false);
+                }
             } else {
                 advertising_start(false);
             }
@@ -758,6 +768,13 @@ void ble_findmy_adv_update(const uint8_t key[APP_FINDMY_BEACON_KEY_LEN]) {
  * still makes the call fail, which the caller defers.
  */
 static bool findmy_apply_identity_addr(const ble_gap_addr_t *addr) {
+    // Changing the identity address while a link is up can make the peer
+    // disconnect. Keep the new key pending until the disconnect handler runs.
+    if (is_nus_working()) {
+        NRF_LOG_DEBUG("FindMy address update deferred while connected");
+        return false;
+    }
+
     bool restart_advertising = false;
     if (m_advertising.adv_mode_current != BLE_ADV_MODE_IDLE) {
         sd_ble_gap_adv_stop(m_advertising.adv_handle);
@@ -904,6 +921,20 @@ void ble_findmy_advertising_stop(void) {
 
 bool ble_findmy_is_advertising(void) {
     return m_findmy_adv_active;
+}
+
+bool ble_findmy_enter_connectable_mode(void) {
+    if (is_nus_working()) {
+        return false;
+    }
+    if (m_findmy_adv_active) {
+        // Shared-set mode restores the factory address and starts the normal
+        // connectable advertisement. Two-set mode already has it running.
+        ble_findmy_advertising_stop();
+    } else if (m_advertising.adv_mode_current == BLE_ADV_MODE_IDLE) {
+        advertising_start(false);
+    }
+    return true;
 }
 
 bool ble_findmy_uses_two_sets(void) {

@@ -88,6 +88,19 @@ void light_up_by_slot(void) {
     }
 }
 
+void light_down_all(void) {
+    uint32_t *led_pins = hw_get_led_array();
+    uint32_t *rgb_pins = hw_get_rgb_array();
+    for (int i = 0; i < RGB_LIST_NUM; i++) {
+        nrf_gpio_pin_clear(led_pins[i]);
+    }
+    // RGB LED uses active-low outputs; setting all pins high turns it off.
+    for (int i = 0; i < RGB_CTRL_NUM; i++) {
+        nrf_gpio_pin_set(rgb_pins[i]);
+    }
+    TAG_FIELD_LED_OFF();
+}
+
 /**
  * @brief Apply visual and state changes after switching slot
  */

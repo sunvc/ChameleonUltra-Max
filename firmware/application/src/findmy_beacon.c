@@ -1,12 +1,14 @@
 #include <string.h>
 
 #include "app_util.h"
+#include "app_timer.h"
 #include "bsp_delay.h"
 #include "fds_ids.h"
 #include "fds_util.h"
 #include "findmy_beacon.h"
 #include "ble_main.h"
 #include "rfid_main.h"
+#include "rgb_marquee.h"
 #include "syssleep.h"
 #include "utils.h"
 
@@ -29,6 +31,24 @@ STATIC_ASSERT(sizeof(findmy_beacon_config_t) == 32, "FindMy config must be 32 by
 static bool m_config_enabled = false;
 static bool m_pending_address = false;
 static bool m_led_feedback_enabled = false;
+static bool m_connectable_window_active = false;
+
+extern volatile bool g_usb_led_marquee_enable;
+
+APP_TIMER_DEF(m_connectable_window_timer);
+
+static void findmy_beacon_apply(void);
+
+static void findmy_beacon_connectable_window_timeout(void *p_context) {
+    UNUSED_VARIABLE(p_context);
+    m_connectable_window_active = false;
+    if (is_nus_working()) {
+        // The app is connected. Restore FindMy after the link is gone.
+        return;
+    }
+    findmy_beacon_clear_indicator_leds();
+    findmy_beacon_apply();
+}
 
 /**
  * @brief (Re)configure and start or stop the FindMy advertising set.
@@ -84,6 +104,13 @@ void findmy_beacon_init(void) {
     }
 
     m_config_enabled = m_config.enable != 0;
+
+    ret_code_t timer_err = app_timer_create(&m_connectable_window_timer, APP_TIMER_MODE_SINGLE_SHOT,
+        findmy_beacon_connectable_window_timeout);
+    if (timer_err != NRF_SUCCESS) {
+        NRF_LOG_ERROR("FindMy connectable timer create failed: %d", timer_err);
+    }
+
     if (m_config_enabled) {
         findmy_beacon_apply();
     }
@@ -118,6 +145,11 @@ bool findmy_beacon_set_config(const findmy_beacon_config_t *cfg) {
         m_config_enabled = prev_enabled;
         m_led_feedback_enabled = false;
         return false;
+    }
+
+    if (!m_config_enabled) {
+        m_connectable_window_active = false;
+        app_timer_stop(m_connectable_window_timer);
     }
 
     findmy_beacon_apply();
@@ -169,7 +201,7 @@ bool findmy_beacon_is_active(void) {
 }
 
 void findmy_beacon_on_ble_disconnected(void) {
-    if (m_config_enabled && m_pending_address) {
+    if (m_config_enabled && m_pending_address && !m_connectable_window_active) {
         // The link is gone; the identity address can be changed again. The
         // advertising set kept running with the old address meanwhile.
         m_pending_address = !ble_findmy_set_address(m_config.key);
@@ -178,9 +210,38 @@ void findmy_beacon_on_ble_disconnected(void) {
 }
 
 void findmy_beacon_start_if_enabled(void) {
-    if (m_config_enabled) {
+    if (m_config_enabled && !m_connectable_window_active) {
         findmy_beacon_apply();
     }
+}
+
+void findmy_beacon_start_connectable_window(uint32_t duration_ms) {
+    if (!m_config_enabled || is_nus_working()) {
+        return;
+    }
+    if (duration_ms < 1000) {
+        duration_ms = 1000;
+    }
+    if (!ble_findmy_enter_connectable_mode()) {
+        return;
+    }
+    m_connectable_window_active = true;
+    app_timer_stop(m_connectable_window_timer);
+    ret_code_t err = app_timer_start(m_connectable_window_timer, APP_TIMER_TICKS(duration_ms), NULL);
+    if (err != NRF_SUCCESS) {
+        NRF_LOG_WARNING("FindMy connectable timer start failed: %d", err);
+    }
+    NRF_LOG_INFO("FindMy paused for connectable window");
+}
+
+bool findmy_beacon_connectable_window_active(void) {
+    return m_connectable_window_active;
+}
+
+void findmy_beacon_clear_indicator_leds(void) {
+    g_usb_led_marquee_enable = false;
+    rgb_marquee_stop();
+    light_down_all();
 }
 
 bool findmy_beacon_should_stay_awake(void) {
